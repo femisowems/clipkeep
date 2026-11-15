@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build ClipKeep.app
-        run: ./build.sh
+        run: bash ./build.sh
       - name: Package app
         run: ditto -c -k --keepParent ClipKeep.app ClipKeep.zip
       - uses: actions/upload-artifact@v4
