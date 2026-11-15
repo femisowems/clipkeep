@@ -1036,7 +1036,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         InstallEventHandler(GetApplicationEventTarget(), { _, event, _ -> OSStatus in
             var hkID = EventHotKeyID()
             if let ev = event {
-                _ = GetEventParameter(ev, kEventParamDirectObject, typeEventHotKeyID, nil,
+                _ = GetEventParameter(ev, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil,
                                       MemoryLayout<EventHotKeyID>.size, nil, &hkID)
             }
             if hkID.id == 2 {
