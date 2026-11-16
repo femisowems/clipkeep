@@ -415,7 +415,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         // to be, unchecked, and a degenerate frame saved by an early
         // build (a ~60pt-wide, full-height strip) came back verbatim
         // on every launch and squeezed the whole panel into it.
-        restorePanelFrame()
+        // restorePanelFrame() is called at the end of buildPanel —
+        // the validated frame must be the last word, applied after
+        // the content view and its constraints exist.
 
         let content = NSView()
         content.wantsLayer = true
@@ -541,6 +543,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             scrollView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
             scrollView.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -10),
             scrollView.bottomAnchor.constraint(equalTo: hint.topAnchor, constant: -8),
+            // Floors so the content's fitting size can never collapse
+            // the window: in 2.0.x the old rows' fitting width was
+            // ~60pt and AppKit's constraint-based window sizing shrank
+            // the panel to a strip on the first layout pass.
+            scrollView.widthAnchor.constraint(greaterThanOrEqualToConstant: 420),
+            scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 200),
 
             emptyLabel.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
             emptyLabel.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
@@ -561,12 +569,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         ])
 
         refreshList()
+        restorePanelFrame()
     }
 
     // MARK: Panel frame persistence (manual, validated)
 
     private let panelFrameKey = "ClipKeepPanelFrameV3"
-    private var correctingPanelFrame = false
 
     private func panelFrameIsUsable(_ f: NSRect) -> Bool {
         guard f.width >= panel.minSize.width, f.height >= panel.minSize.height else { return false }
@@ -594,16 +602,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
     func windowDidResize(_ notification: Notification) {
         guard let w = notification.object as? NSWindow, w === panel else { return }
-        let f = w.frame
-        if !correctingPanelFrame && (f.width < w.minSize.width || f.height < w.minSize.height) {
-            // Something shrank the panel below its usable minimum
-            // while running. Snap back to the default size instead
-            // of letting the strip stick around or be saved.
-            correctingPanelFrame = true
-            w.setFrame(NSRect(x: 0, y: 0, width: 520, height: 680), display: true)
-            w.center()
-            correctingPanelFrame = false
-        }
+        // Never call setFrame from here. A setFrame triggers a layout
+        // pass; the layout pass can resize the window again, and that
+        // resize -> setFrame -> layout loop is exactly what made
+        // AppKit throw and abort on launch in 2.1.0. Frame correction
+        // happens in togglePanel instead, before the panel is shown.
         savePanelFrame()
     }
 
@@ -1354,6 +1357,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             panel.orderOut(nil)
         } else {
             refreshList()
+            if !panelFrameIsUsable(panel.frame) { restorePanelFrame() }
             panel.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             panel.makeFirstResponder(searchField)
