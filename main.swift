@@ -235,7 +235,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     var stackLabel: NSTextField!
     var listStack: NSStackView!
     var scrollView: NSScrollView!
-    var pauseButton: NSButton!
     var emptyLabel: NSTextField!
     var exclusionsWindow: NSWindow?
     var exclusionsStack: NSStackView?
@@ -881,7 +880,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     // MARK: Panel UI
 
     func buildPanel() {
-        panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 880, height: 470),
+        panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 520),
                          styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
                          backing: .buffered, defer: false)
         panel.title = "ClipKeep"
@@ -889,8 +888,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         panel.level = .floating
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        panel.minSize = NSSize(width: 600, height: 380)
-        panel.contentMinSize = NSSize(width: 600, height: 360)
+        panel.minSize = NSSize(width: 700, height: 400)
+        panel.contentMinSize = NSSize(width: 700, height: 380)
         panel.delegate = self
         // Frame persistence is manual and validated — see
         // restorePanelFrame() below. NSWindow's frame autosave is
@@ -1015,46 +1014,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         emptyLabel.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(emptyLabel)
 
-        let clearButton = NSButton(title: "Clear history", target: self, action: #selector(clearHistory))
-        clearButton.bezelStyle = .rounded
-        clearButton.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(clearButton)
-
-        pauseButton = NSButton(title: "Pause capture", target: self, action: #selector(togglePause))
-        pauseButton.bezelStyle = .rounded
-        pauseButton.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(pauseButton)
-
-        let excludedButton = NSButton(title: "Excluded apps…", target: self, action: #selector(showExclusions))
-        excludedButton.bezelStyle = .rounded
-        excludedButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        excludedButton.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(excludedButton)
-
-        let limitPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-        for (title, value) in [("Limit 200", 200), ("Limit 500", 500), ("Limit 1000", 1000), ("No limit", 0)] {
-            let item = NSMenuItem(title: title, action: #selector(limitChosen(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = value
-            limitPopup.menu?.addItem(item)
-        }
-        limitPopup.selectItem(at: [200, 500, 1000, 0].firstIndex(of: store.historyLimit) ?? 0)
-        limitPopup.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
-        limitPopup.translatesAutoresizingMaskIntoConstraints = false
-        limitPopup.identifier = NSUserInterfaceItemIdentifier("limitPopup")
-        content.addSubview(limitPopup)
-
-        let quitButton = NSButton(title: "Quit", target: self, action: #selector(quitApp))
-        quitButton.bezelStyle = .rounded
-        quitButton.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(quitButton)
-
-        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
-        let hint = NSTextField(labelWithString: "Click an item to paste it · ⌘1–9 quick-pastes · ⌘⇧V toggles this panel" + (appVersion.isEmpty ? "" : " · v\(appVersion)"))
-        hint.font = NSFont.systemFont(ofSize: 11)
-        hint.textColor = .secondaryLabelColor
-        hint.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(hint)
+        // Paste-style overflow menu: everything that used to live
+        // in a footer button row (pause, history limit, excluded
+        // apps, clear, quit — plus the version) sits behind one
+        // "•••" button beside the search field, leaving the panel
+        // to the cards.
+        let overflowButton = NSButton(title: "•••", target: self, action: #selector(showOverflowMenu(_:)))
+        overflowButton.bezelStyle = .rounded
+        overflowButton.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        overflowButton.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(overflowButton)
 
         NSLayoutConstraint.activate([
             // The safe area starts below the title bar; anchoring to
@@ -1063,7 +1032,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             // hidden except for its focus ring.
             searchField.topAnchor.constraint(equalTo: content.safeAreaLayoutGuide.topAnchor, constant: 10),
             searchField.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
-            searchField.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -10),
+            searchField.trailingAnchor.constraint(equalTo: overflowButton.leadingAnchor, constant: -8),
+
+            overflowButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -10),
+            overflowButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
+            overflowButton.widthAnchor.constraint(equalToConstant: 44),
 
             typeControl.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 8),
             typeControl.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
@@ -1080,7 +1053,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             scrollView.topAnchor.constraint(equalTo: stackBar.bottomAnchor, constant: 8),
             scrollView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
             scrollView.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -10),
-            scrollView.bottomAnchor.constraint(equalTo: hint.topAnchor, constant: -8),
+            scrollView.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10),
             // Floors so the content's fitting size can never collapse
             // the window: in 2.0.x the old rows' fitting width was
             // ~60pt and AppKit's constraint-based window sizing shrank
@@ -1090,24 +1063,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
             emptyLabel.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
             emptyLabel.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
-            emptyLabel.widthAnchor.constraint(lessThanOrEqualTo: scrollView.widthAnchor, constant: -48),
-
-            hint.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
-            hint.bottomAnchor.constraint(equalTo: clearButton.topAnchor, constant: -6),
-
-            clearButton.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
-            clearButton.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10),
-            pauseButton.leadingAnchor.constraint(equalTo: clearButton.trailingAnchor, constant: 8),
-            pauseButton.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10),
-            excludedButton.leadingAnchor.constraint(equalTo: pauseButton.trailingAnchor, constant: 8),
-            excludedButton.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10),
-            limitPopup.leadingAnchor.constraint(equalTo: excludedButton.trailingAnchor, constant: 8),
-            limitPopup.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10),
-            // Keep the Limit popup from colliding with Quit at the
-            // panel's minimum width (they overlapped before).
-            limitPopup.trailingAnchor.constraint(lessThanOrEqualTo: quitButton.leadingAnchor, constant: -8),
-            quitButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -10),
-            quitButton.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10)
+            emptyLabel.widthAnchor.constraint(lessThanOrEqualTo: scrollView.widthAnchor, constant: -48)
         ])
 
         refreshList()
@@ -1284,7 +1240,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         if let upd = availableUpdate, UserDefaults.standard.string(forKey: "dismissedUpdateVersion") != upd.version {
             let banner = updateBanner(version: upd.version)
             listStack.addArrangedSubview(banner)
-            banner.widthAnchor.constraint(equalToConstant: 280).isActive = true
+            banner.widthAnchor.constraint(equalToConstant: 300).isActive = true
             banner.heightAnchor.constraint(equalTo: listStack.heightAnchor).isActive = true
         }
 
@@ -1317,8 +1273,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         listStack.addArrangedSubview(row)
         // Fixed-width cards in the horizontal feed; the card's
         // height fills the list.
-        row.widthAnchor.constraint(equalToConstant: 280).isActive = true
+        row.widthAnchor.constraint(equalToConstant: 300).isActive = true
         row.heightAnchor.constraint(equalTo: listStack.heightAnchor).isActive = true
+        // The current clip (⌘1) gets Paste's blue selection outline.
+        if index == 0 {
+            row.layer?.borderColor = NSColor.controlAccentColor.cgColor
+            row.layer?.borderWidth = 2.5
+        }
     }
 
     func sectionLabel(_ text: String) -> NSTextField {
@@ -1570,7 +1531,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             iv.layer?.masksToBounds = true
             iv.layer?.backgroundColor = NSColor(white: 0.95, alpha: 1).cgColor
             iv.translatesAutoresizingMaskIntoConstraints = false
-            iv.heightAnchor.constraint(equalToConstant: 100).isActive = true
+            iv.heightAnchor.constraint(equalToConstant: 150).isActive = true
             body.addArrangedSubview(iv)
             fullWidth(iv)
             if let ocr = item.ocrText, !ocr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -1637,7 +1598,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                     iv.layer?.masksToBounds = true
                     iv.layer?.backgroundColor = NSColor(white: 0.95, alpha: 1).cgColor
                     iv.translatesAutoresizingMaskIntoConstraints = false
-                    iv.heightAnchor.constraint(equalToConstant: 84).isActive = true
+                    iv.heightAnchor.constraint(equalToConstant: 120).isActive = true
                     body.addArrangedSubview(iv)
                     fullWidth(iv)
                 }
@@ -1864,8 +1825,45 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
     @objc func togglePause() {
         capturePaused.toggle()
-        pauseButton.title = capturePaused ? "Resume capture" : "Pause capture"
         statusItem.button?.title = capturePaused ? "📋⏸" : "📋"
+    }
+
+    // The panel's "•••" menu (built fresh on every click, so the
+    // Pause/Resume label and the limit checkmark are always right).
+    @objc func showOverflowMenu(_ sender: NSButton) {
+        guard let event = NSApp.currentEvent else { return }
+        let menu = NSMenu()
+        func add(_ title: String, _ action: Selector) {
+            let mi = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            mi.target = self
+            menu.addItem(mi)
+        }
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+        if !version.isEmpty {
+            let header = NSMenuItem(title: "ClipKeep v\(version)", action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+            menu.addItem(.separator())
+        }
+        add(capturePaused ? "Resume Capture" : "Pause Capture", #selector(togglePause))
+        add("Check for Updates…", #selector(checkForUpdateClicked))
+        menu.addItem(.separator())
+        let limitItem = NSMenuItem(title: "History Limit", action: nil, keyEquivalent: "")
+        let limitMenu = NSMenu()
+        for (title, value) in [("200 clips", 200), ("500 clips", 500), ("1000 clips", 1000), ("No limit", 0)] {
+            let mi = NSMenuItem(title: title, action: #selector(limitChosen(_:)), keyEquivalent: "")
+            mi.target = self
+            mi.representedObject = value
+            mi.state = store.historyLimit == value ? .on : .off
+            limitMenu.addItem(mi)
+        }
+        limitItem.submenu = limitMenu
+        menu.addItem(limitItem)
+        add("Excluded Apps…", #selector(showExclusions))
+        add("Clear History", #selector(clearHistory))
+        menu.addItem(.separator())
+        add("Quit ClipKeep", #selector(quitApp))
+        NSMenu.popUpContextMenu(menu, with: event, for: sender)
     }
 
     @objc func quitApp() {
