@@ -881,7 +881,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     // MARK: Panel UI
 
     func buildPanel() {
-        panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 680),
+        panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 880, height: 470),
                          styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
                          backing: .buffered, defer: false)
         panel.title = "ClipKeep"
@@ -889,8 +889,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         panel.level = .floating
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        panel.minSize = NSSize(width: 440, height: 480)
-        panel.contentMinSize = NSSize(width: 440, height: 440)
+        panel.minSize = NSSize(width: 600, height: 380)
+        panel.contentMinSize = NSSize(width: 600, height: 360)
         panel.delegate = self
         // Frame persistence is manual and validated — see
         // restorePanelFrame() below. NSWindow's frame autosave is
@@ -968,15 +968,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         content.addSubview(stackBar)
 
         scrollView = NSScrollView()
-        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.hasVerticalScroller = false
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = false
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(scrollView)
 
         listStack = NSStackView()
-        listStack.orientation = .vertical
-        listStack.alignment = .leading
+        listStack.orientation = .horizontal
+        listStack.alignment = .top
         listStack.spacing = 12
         listStack.translatesAutoresizingMaskIntoConstraints = false
 
@@ -1000,8 +1001,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             // height, and every row was clipped away — the panel
             // looked empty while the history on disk was full.
             listStack.bottomAnchor.constraint(equalTo: clipView.bottomAnchor, constant: -12),
-            clipView.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
-            clipView.heightAnchor.constraint(greaterThanOrEqualTo: scrollView.contentView.heightAnchor)
+            // Horizontal feed: the document view's WIDTH is driven
+            // by the cards laid out along it; its height fills the
+            // scroll viewport exactly.
+            clipView.heightAnchor.constraint(equalTo: scrollView.contentView.heightAnchor),
+            clipView.widthAnchor.constraint(greaterThanOrEqualTo: scrollView.contentView.widthAnchor)
         ])
 
         emptyLabel = NSTextField(labelWithString: "Nothing here yet — copy something and it will show up.")
@@ -1112,7 +1116,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
     // MARK: Panel frame persistence (manual, validated)
 
-    private let panelFrameKey = "ClipKeepPanelFrameV3"
+    // V4: the horizontal-feed layout (v2.3.0) starts from a fresh
+    // wide, short default frame instead of the old tall one.
+    private let panelFrameKey = "ClipKeepPanelFrameV4"
 
     private func panelFrameIsUsable(_ f: NSRect) -> Bool {
         guard f.width >= panel.minSize.width, f.height >= panel.minSize.height else { return false }
@@ -1278,7 +1284,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         if let upd = availableUpdate, UserDefaults.standard.string(forKey: "dismissedUpdateVersion") != upd.version {
             let banner = updateBanner(version: upd.version)
             listStack.addArrangedSubview(banner)
-            banner.widthAnchor.constraint(equalTo: listStack.widthAnchor).isActive = true
+            banner.widthAnchor.constraint(equalToConstant: 280).isActive = true
+            banner.heightAnchor.constraint(equalTo: listStack.heightAnchor).isActive = true
         }
 
         let items = visibleItems()
@@ -1293,17 +1300,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         }
 
         if boardFilter == nil {
+            // Horizontal feed: no section headers — pinned clips
+            // still come first and carry a 📌 on their card.
             let pinned = items.filter { $0.pinned }
             let rest = items.filter { !$0.pinned }
             var index = 0
-            if !pinned.isEmpty {
-                listStack.addArrangedSubview(sectionLabel("Pinned"))
-                for item in pinned { addRow(item, index: index); index += 1 }
-            }
-            if !rest.isEmpty {
-                if !pinned.isEmpty { listStack.addArrangedSubview(sectionLabel("History")) }
-                for item in rest { addRow(item, index: index); index += 1 }
-            }
+            for item in pinned { addRow(item, index: index); index += 1 }
+            for item in rest { addRow(item, index: index); index += 1 }
         } else {
             for (index, item) in items.enumerated() { addRow(item, index: index) }
         }
@@ -1312,7 +1315,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     func addRow(_ item: ClipItem, index: Int) {
         let row = rowView(for: item, index: index)
         listStack.addArrangedSubview(row)
-        row.widthAnchor.constraint(equalTo: listStack.widthAnchor).isActive = true
+        // Fixed-width cards in the horizontal feed; the card's
+        // height fills the list.
+        row.widthAnchor.constraint(equalToConstant: 280).isActive = true
+        row.heightAnchor.constraint(equalTo: listStack.heightAnchor).isActive = true
     }
 
     func sectionLabel(_ text: String) -> NSTextField {
@@ -1564,7 +1570,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             iv.layer?.masksToBounds = true
             iv.layer?.backgroundColor = NSColor(white: 0.95, alpha: 1).cgColor
             iv.translatesAutoresizingMaskIntoConstraints = false
-            iv.heightAnchor.constraint(equalToConstant: 130).isActive = true
+            iv.heightAnchor.constraint(equalToConstant: 100).isActive = true
             body.addArrangedSubview(iv)
             fullWidth(iv)
             if let ocr = item.ocrText, !ocr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -1631,7 +1637,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                     iv.layer?.masksToBounds = true
                     iv.layer?.backgroundColor = NSColor(white: 0.95, alpha: 1).cgColor
                     iv.translatesAutoresizingMaskIntoConstraints = false
-                    iv.heightAnchor.constraint(equalToConstant: 110).isActive = true
+                    iv.heightAnchor.constraint(equalToConstant: 84).isActive = true
                     body.addArrangedSubview(iv)
                     fullWidth(iv)
                 }
