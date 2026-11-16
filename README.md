@@ -15,6 +15,10 @@ copy never leaves your Mac.
 *(Repository codename: **keepsake** — it keeps what you copy, for
 safekeeping. The app itself is called ClipKeep.)*
 
+> 🚧 **Work in progress** — ClipKeep is under active development.
+> Features, behaviour and this README may change between versions,
+> and things may break. It isn't ready for general use yet.
+
 ---
 
 ## Features
@@ -46,8 +50,10 @@ safekeeping. The app itself is called ClipKeep.)*
     mark theirs) are **never recorded**.
   - An **Excluded apps** list: copies made while an excluded app is
     frontmost are never recorded either.
-  - History lives in one local folder; there is no network code in
-    the app at all.
+  - History lives in one local folder on your Mac. The only network
+    requests the app ever makes are fetching a copied link's page
+    title/preview image and checking a public version feed for
+    updates — nothing about your history is sent anywhere.
 - **Your history, your limit** — 200 unpinned clips by default, or
   500, 1000, or no limit. Identical copies are de-duplicated (copying
   the same thing again just brings it back to the top).
@@ -78,79 +84,11 @@ safekeeping. The app itself is called ClipKeep.)*
   `swiftc`). You do **not** need the full Xcode app, an Apple Developer
   account, or the App Store.
 
-## Quick start
-
-```bash
-git clone https://github.com/femisowems/keepsake.git
-cd keepsake
-chmod +x build.sh
-./build.sh
-```
-
-That compiles the app and produces **`ClipKeep.app`** in the same
-folder, with its icon bundled and an ad-hoc code signature applied.
-
-If the build says `swiftc` is missing, install the Command Line Tools
-first, wait for Apple's installer to finish, then run `./build.sh`
-again:
-
-```bash
-xcode-select --install
-```
-
 ## Installing
 
-1. Drag **`ClipKeep.app`** into your **Applications** folder.
-2. Double-click it. A 📋 appears in your menu bar — there is no Dock
-   icon; the app lives in the menu bar and its floating panel.
-3. **First launch:** the build is ad-hoc signed rather than notarized,
-   so a *downloaded* copy is blocked by Gatekeeper until you approve
-   it once — see *First launch* below. (A copy you built yourself
-   opens with no warning at all.)
-4. Optional but recommended: the first time you click a clip to paste
-   it back, grant **Accessibility** permission when macOS asks
-   (System Settings → Privacy & Security → Accessibility). With it,
-   ClipKeep pastes directly into the app underneath; without it, the
-   clip still lands on your clipboard and you press ⌘V yourself.
-
-## First launch — the "Apple could not verify" dialog
-
-If you downloaded a prebuilt `ClipKeep.app` (for example the artifact
-from a CI run) instead of building it yourself, the first launch will
-likely show:
-
-> **"ClipKeep" Not Opened** — Apple could not verify "ClipKeep" is
-> free of malware that may harm your Mac or compromise your privacy.
-
-This is expected, and it does not mean anything is wrong with the app.
-ClipKeep is signed with an ad-hoc signature, not a paid Apple Developer
-ID, and it is not notarized — so Gatekeeper blocks any *downloaded*
-copy until you approve it once. The source is right here in this repo;
-the build takes one command, and CI builds it from this exact code.
-
-**Do not click "Move to Trash."** Click **Done**, then approve it once:
-
-1. Open **System Settings → Privacy & Security**.
-2. Scroll to the **Security** section. You will see a line saying
-   "ClipKeep" was blocked to protect your Mac.
-3. Click **Open Anyway**, authenticate (Touch ID or password), then
-   click **Open** in the confirmation dialog.
-
-ClipKeep launches, and macOS remembers the exception — every later
-launch, including updates you replace in place in Applications, opens
-normally.
-
-**Terminal alternative** (same result, one command — it removes the
-"downloaded from the internet" quarantine flag that triggers the
-block):
-
-```bash
-xattr -dr com.apple.quarantine /Applications/ClipKeep.app
-```
-
-**Skip the dialog entirely:** build from source instead (see *Quick
-start*). An app compiled on your own Mac is never quarantined, so it
-opens without any of this.
+**Coming soon.** ClipKeep is a work in progress and isn't ready for
+general installation yet. Full install instructions will land here
+when it is.
 
 ## How to use it
 
@@ -191,7 +129,7 @@ opens without any of this.
 
 ## How it works
 
-ClipKeep is a single-file AppKit app (`main.swift`, ~1,100 lines). It
+ClipKeep is a single-file AppKit app (`main.swift`, ~1,900 lines). It
 polls the system pasteboard's change count twice a second; on a
 change it skips concealed/transient copies and excluded apps, then
 records the first matching type — file, image, colour, or text —
@@ -215,22 +153,13 @@ keepsake/
 └── README.md
 ```
 
-## Downloading vs building
-
-Prebuilt copies are published on the
-[Releases page](https://github.com/femisowems/keepsake/releases) —
-each is the exact artifact produced by this repo's CI from the tagged
-commit, so what you download is verifiably what this source builds.
-Downloaded copies need the one-time **Open Anyway** approval described
-above. Building from source takes one command, needs nothing but the
-free Command Line Tools, and skips the Gatekeeper dialog entirely —
-recommended if you're comfortable in a terminal.
-
 ## Privacy
 
-ClipKeep collects nothing, stores nothing beyond your clipboard
-history and its own settings, and makes no network connections. There
-is no analytics, no account, and no update checker phoning home. Your
+ClipKeep collects nothing and stores nothing beyond your clipboard
+history and its own settings. There is no analytics, no account and
+no tracking; the only network requests are the link-preview fetches
+and the version check described above, and neither sends your
+history anywhere. Your
 history folder is yours: delete `~/Library/Application
 Support/ClipKeep` and everything is gone.
 
