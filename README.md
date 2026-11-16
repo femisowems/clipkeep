@@ -52,6 +52,13 @@ safekeeping. The app itself is called ClipKeep.)*
   500, 1000, or no limit. Identical copies are de-duplicated (copying
   the same thing again just brings it back to the top).
 - **Pause capture** any time from the panel.
+- **A card for every clip** (v2.1) — the panel is styled after Paste:
+  white rounded cards on a light backdrop, a coloured header band per
+  clip (text cards take their colour from the app you copied from,
+  links are green, files blue, images purple, colour clips wear the
+  colour itself), the source app's icon in a badge, relative times
+  ("4 hours ago"), and Paste-style footers — character counts, image
+  dimensions, file sizes.
 
 ## Requirements
 

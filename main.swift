@@ -178,7 +178,7 @@ func colorFromHex(_ hex: String) -> NSColor? {
 
 // MARK: - App
 
-final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegate {
+final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegate, NSWindowDelegate {
     static let shared = AppController()
 
     let store = ClipStore()
@@ -398,34 +398,28 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     // MARK: Panel UI
 
     func buildPanel() {
-        panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 640),
+        panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 680),
                          styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
                          backing: .buffered, defer: false)
         panel.title = "ClipKeep"
+        panel.appearance = NSAppearance(named: .aqua)   // Paste-style light look
         panel.level = .floating
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        panel.minSize = NSSize(width: 420, height: 440)
-        panel.contentMinSize = NSSize(width: 420, height: 400)
-        // Remember the size and position the user leaves it at, and
-        // restore them on the next launch instead of re-centering.
-        // The autosave name is versioned (…V2): earlier builds shared
-        // the "ClipKeepPanel" name, and a degenerate frame saved under
-        // it (a ~60pt-wide, full-height strip) came back verbatim —
-        // setFrameUsingName does not clamp the restored frame to
-        // minSize. Validate whatever was restored and fall back to
-        // the default size when it is unusable.
-        let autosaveName = "ClipKeepPanelV2"
-        panel.setFrameAutosaveName(autosaveName)
-        let restored = panel.setFrameUsingName(autosaveName)
-        let f = panel.frame
-        let onScreen = NSScreen.screens.contains { $0.visibleFrame.intersects(f) }
-        if !restored || f.width < panel.minSize.width || f.height < panel.minSize.height || !onScreen {
-            panel.setFrame(NSRect(x: 0, y: 0, width: 480, height: 640), display: false)
-            panel.center()
-        }
+        panel.minSize = NSSize(width: 440, height: 480)
+        panel.contentMinSize = NSSize(width: 440, height: 440)
+        panel.delegate = self
+        // Frame persistence is manual and validated — see
+        // restorePanelFrame() below. NSWindow's frame autosave is
+        // deliberately not used: it writes whatever the frame happens
+        // to be, unchecked, and a degenerate frame saved by an early
+        // build (a ~60pt-wide, full-height strip) came back verbatim
+        // on every launch and squeezed the whole panel into it.
+        restorePanelFrame()
 
         let content = NSView()
+        content.wantsLayer = true
+        content.layer?.backgroundColor = NSColor(red: 0.961, green: 0.961, blue: 0.969, alpha: 1).cgColor
         panel.contentView = content
 
         searchField = NSSearchField()
@@ -463,24 +457,25 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
         scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
-        scrollView.borderType = .bezelBorder
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(scrollView)
 
         listStack = NSStackView()
         listStack.orientation = .vertical
         listStack.alignment = .leading
-        listStack.spacing = 6
+        listStack.spacing = 12
         listStack.translatesAutoresizingMaskIntoConstraints = false
 
         let clipView = NSView()
         clipView.addSubview(listStack)
         scrollView.documentView = clipView
         NSLayoutConstraint.activate([
-            listStack.leadingAnchor.constraint(equalTo: clipView.leadingAnchor, constant: 8),
-            listStack.trailingAnchor.constraint(equalTo: clipView.trailingAnchor, constant: -8),
-            listStack.topAnchor.constraint(equalTo: clipView.topAnchor, constant: 8),
-            listStack.bottomAnchor.constraint(lessThanOrEqualTo: clipView.bottomAnchor, constant: -8),
+            listStack.leadingAnchor.constraint(equalTo: clipView.leadingAnchor, constant: 12),
+            listStack.trailingAnchor.constraint(equalTo: clipView.trailingAnchor, constant: -12),
+            listStack.topAnchor.constraint(equalTo: clipView.topAnchor, constant: 12),
+            listStack.bottomAnchor.constraint(lessThanOrEqualTo: clipView.bottomAnchor, constant: -12),
             clipView.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor)
         ])
 
@@ -566,6 +561,55 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         ])
 
         refreshList()
+    }
+
+    // MARK: Panel frame persistence (manual, validated)
+
+    private let panelFrameKey = "ClipKeepPanelFrameV3"
+    private var correctingPanelFrame = false
+
+    private func panelFrameIsUsable(_ f: NSRect) -> Bool {
+        guard f.width >= panel.minSize.width, f.height >= panel.minSize.height else { return false }
+        return NSScreen.screens.contains { $0.visibleFrame.intersects(f) }
+    }
+
+    private func restorePanelFrame() {
+        if let saved = UserDefaults.standard.string(forKey: panelFrameKey) {
+            let f = NSRectFromString(saved)
+            if panelFrameIsUsable(f) {
+                panel.setFrame(f, display: false)
+                return
+            }
+        }
+        panel.setFrame(NSRect(x: 0, y: 0, width: 520, height: 680), display: false)
+        panel.center()
+    }
+
+    private func savePanelFrame() {
+        // Only a frame that would pass restore validation is ever
+        // written, so a bad size cannot be saved in the first place.
+        guard panelFrameIsUsable(panel.frame) else { return }
+        UserDefaults.standard.set(NSStringFromRect(panel.frame), forKey: panelFrameKey)
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        guard let w = notification.object as? NSWindow, w === panel else { return }
+        let f = w.frame
+        if !correctingPanelFrame && (f.width < w.minSize.width || f.height < w.minSize.height) {
+            // Something shrank the panel below its usable minimum
+            // while running. Snap back to the default size instead
+            // of letting the strip stick around or be saved.
+            correctingPanelFrame = true
+            w.setFrame(NSRect(x: 0, y: 0, width: 520, height: 680), display: true)
+            w.center()
+            correctingPanelFrame = false
+        }
+        savePanelFrame()
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        guard let w = notification.object as? NSWindow, w === panel else { return }
+        savePanelFrame()
     }
 
     func controlTextDidChange(_ obj: Notification) {
@@ -664,7 +708,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             let rest = items.filter { !$0.pinned }
             var index = 0
             if !pinned.isEmpty {
-                listStack.addArrangedSubview(sectionLabel("📌 Pinned"))
+                listStack.addArrangedSubview(sectionLabel("Pinned"))
                 for item in pinned { addRow(item, index: index); index += 1 }
             }
             if !rest.isEmpty {
@@ -684,7 +728,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
     func sectionLabel(_ text: String) -> NSTextField {
         let label = NSTextField(labelWithString: text)
-        label.font = NSFont.boldSystemFont(ofSize: 11)
+        label.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
         label.textColor = .secondaryLabelColor
         return label
     }
@@ -695,74 +739,322 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         return f.string(from: Date(timeIntervalSince1970: ts))
     }
 
-    func rowView(for item: ClipItem, index: Int) -> NSView {
-        let row = NSStackView()
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 8
-        row.translatesAutoresizingMaskIntoConstraints = false
+    // MARK: Paste-style cards
 
+    static let relativeFormatter: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .full
+        return f
+    }()
+
+    func relativeTimeString(_ ts: Double) -> String {
+        AppController.relativeFormatter.localizedString(for: Date(timeIntervalSince1970: ts), relativeTo: Date())
+    }
+
+    func isLinkItem(_ item: ClipItem) -> Bool {
+        guard item.kind == "text", let raw = item.text else { return false }
+        let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.contains(" "), !t.contains("\n"),
+              let url = URL(string: t), let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https", url.host != nil else { return false }
+        return true
+    }
+
+    func bandColor(for item: ClipItem) -> NSColor {
+        if item.kind == "color", let hex = item.text, let c = colorFromHex(hex) { return c }
+        if isLinkItem(item) { return NSColor(red: 0.204, green: 0.780, blue: 0.349, alpha: 1) }
+        switch item.kind {
+        case "file":
+            return NSColor(red: 0.0, green: 0.478, blue: 1.0, alpha: 1)
+        case "image":
+            return NSColor(red: 0.686, green: 0.322, blue: 0.871, alpha: 1)
+        default:
+            // Text cards take their colour from the source app, like Paste's.
+            let palette: [NSColor] = [
+                NSColor(red: 1.0, green: 0.584, blue: 0.0, alpha: 1),
+                NSColor(red: 0.0, green: 0.478, blue: 1.0, alpha: 1),
+                NSColor(red: 1.0, green: 0.231, blue: 0.188, alpha: 1),
+                NSColor(red: 0.196, green: 0.678, blue: 0.902, alpha: 1),
+                NSColor(red: 0.345, green: 0.337, blue: 0.839, alpha: 1),
+                NSColor(red: 1.0, green: 0.176, blue: 0.333, alpha: 1),
+                NSColor(red: 0.204, green: 0.780, blue: 0.349, alpha: 1),
+                NSColor(red: 0.686, green: 0.322, blue: 0.871, alpha: 1)
+            ]
+            let key = item.sourceBundleID ?? item.sourceApp ?? ""
+            if key.isEmpty { return palette[0] }
+            let sum = key.unicodeScalars.reduce(0) { $0 + Int($1.value) }
+            return palette[sum % palette.count]
+        }
+    }
+
+    func onBandTextColor(for band: NSColor) -> NSColor {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        (band.usingColorSpace(.sRGB) ?? band).getRed(&r, green: &g, blue: &b, alpha: &a)
+        let luminance = 0.299 * r + 0.587 * g + 0.114 * b
+        return luminance > 0.72 ? NSColor(white: 0.16, alpha: 1) : .white
+    }
+
+    func typeLabel(for item: ClipItem) -> String {
+        if isLinkItem(item) { return "Link" }
+        switch item.kind {
+        case "image": return "Image"
+        case "file": return "File"
+        case "color": return "Colour"
+        default: return "Text"
+        }
+    }
+
+    func sourceAppIcon(for item: ClipItem) -> NSImage? {
+        guard let bundleID = item.sourceBundleID,
+              let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else { return nil }
+        let icon = NSWorkspace.shared.icon(forFile: url.path)
+        icon.size = NSSize(width: 24, height: 24)
+        return icon
+    }
+
+    func footerText(for item: ClipItem) -> String {
+        if isLinkItem(item), let raw = item.text,
+           let url = URL(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+           let host = url.host {
+            return host
+        }
+        switch item.kind {
+        case "image":
+            if let url = store.imageURL(for: item), let img = NSImage(contentsOf: url),
+               let rep = img.representations.first {
+                return "PNG · \(rep.pixelsWide) × \(rep.pixelsHigh)"
+            }
+            return "Image"
+        case "file":
+            if let path = item.filePath,
+               let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+               let size = attrs[.size] as? NSNumber {
+                return ByteCountFormatter.string(fromByteCount: size.int64Value, countStyle: .file)
+            }
+            return item.preview
+        case "color":
+            return (item.text ?? "").uppercased()
+        default:
+            let n = (item.text ?? "").count
+            return n == 1 ? "1 character" : "\(n) characters"
+        }
+    }
+
+    func cardFooterButton(_ title: String, action: Selector, id: String, tip: String) -> NSButton {
+        let b = NSButton(title: title, target: self, action: action)
+        b.bezelStyle = .inline
+        b.isBordered = false
+        b.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        b.contentTintColor = .secondaryLabelColor
+        b.toolTip = tip
+        b.identifier = NSUserInterfaceItemIdentifier(id)
+        b.translatesAutoresizingMaskIntoConstraints = false
+        return b
+    }
+
+    func rowView(for item: ClipItem, index: Int) -> NSView {
+        let band = bandColor(for: item)
+        let onBand = onBandTextColor(for: band)
+
+        let card = NSView()
+        card.wantsLayer = true
+        card.layer?.backgroundColor = NSColor.white.cgColor
+        card.layer?.cornerRadius = 14
+        card.layer?.borderWidth = 1
+        card.layer?.borderColor = NSColor(red: 0.89, green: 0.89, blue: 0.91, alpha: 1).cgColor
+        card.layer?.shadowColor = NSColor.black.cgColor
+        card.layer?.shadowOpacity = 0.08
+        card.layer?.shadowRadius = 6
+        card.layer?.shadowOffset = NSSize(width: 0, height: -2)
+        card.translatesAutoresizingMaskIntoConstraints = false
+
+        // Header band: type + relative time on the left, source-app badge right.
+        let header = NSView()
+        header.wantsLayer = true
+        header.layer?.backgroundColor = band.cgColor
+        header.layer?.cornerRadius = 14
+        header.layer?.maskedCorners = [.layerMinXMaxYCorner, .layerMaxXMaxYCorner]
+        header.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(header)
+
+        let typeText = NSTextField(labelWithString: typeLabel(for: item))
+        typeText.font = NSFont.systemFont(ofSize: 12.5, weight: .bold)
+        typeText.textColor = onBand
+        typeText.translatesAutoresizingMaskIntoConstraints = false
+        header.addSubview(typeText)
+
+        let timeText = NSTextField(labelWithString: relativeTimeString(item.createdAt))
+        timeText.font = NSFont.systemFont(ofSize: 10.5)
+        timeText.textColor = onBand.withAlphaComponent(0.85)
+        timeText.translatesAutoresizingMaskIntoConstraints = false
+        header.addSubview(timeText)
+
+        NSLayoutConstraint.activate([
+            header.topAnchor.constraint(equalTo: card.topAnchor),
+            header.leadingAnchor.constraint(equalTo: card.leadingAnchor),
+            header.trailingAnchor.constraint(equalTo: card.trailingAnchor),
+            header.heightAnchor.constraint(equalToConstant: 46),
+            typeText.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 12),
+            typeText.topAnchor.constraint(equalTo: header.topAnchor, constant: 6),
+            timeText.leadingAnchor.constraint(equalTo: typeText.leadingAnchor),
+            timeText.topAnchor.constraint(equalTo: typeText.bottomAnchor, constant: 1)
+        ])
+
+        var lastInHeader: NSLayoutXAxisAnchor = typeText.trailingAnchor
         if index < 9 {
             let badge = NSTextField(labelWithString: "⌘\(index + 1)")
-            badge.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-            badge.textColor = .tertiaryLabelColor
-            row.addArrangedSubview(badge)
+            badge.font = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .medium)
+            badge.textColor = onBand.withAlphaComponent(0.8)
+            badge.translatesAutoresizingMaskIntoConstraints = false
+            header.addSubview(badge)
+            NSLayoutConstraint.activate([
+                badge.leadingAnchor.constraint(equalTo: lastInHeader, constant: 7),
+                badge.centerYAnchor.constraint(equalTo: typeText.centerYAnchor)
+            ])
+            lastInHeader = badge.trailingAnchor
+        }
+        if item.pinned {
+            let pinMark = NSTextField(labelWithString: "📌")
+            pinMark.font = NSFont.systemFont(ofSize: 9)
+            pinMark.translatesAutoresizingMaskIntoConstraints = false
+            header.addSubview(pinMark)
+            NSLayoutConstraint.activate([
+                pinMark.leadingAnchor.constraint(equalTo: lastInHeader, constant: 6),
+                pinMark.centerYAnchor.constraint(equalTo: typeText.centerYAnchor)
+            ])
+        }
+        if let icon = sourceAppIcon(for: item) {
+            let badgeBox = NSView()
+            badgeBox.wantsLayer = true
+            badgeBox.layer?.backgroundColor = NSColor.white.cgColor
+            badgeBox.layer?.cornerRadius = 8
+            badgeBox.layer?.shadowColor = NSColor.black.cgColor
+            badgeBox.layer?.shadowOpacity = 0.15
+            badgeBox.layer?.shadowRadius = 3
+            badgeBox.layer?.shadowOffset = NSSize(width: 0, height: -1)
+            badgeBox.translatesAutoresizingMaskIntoConstraints = false
+            let iv = NSImageView(image: icon)
+            iv.translatesAutoresizingMaskIntoConstraints = false
+            badgeBox.addSubview(iv)
+            header.addSubview(badgeBox)
+            NSLayoutConstraint.activate([
+                badgeBox.widthAnchor.constraint(equalToConstant: 32),
+                badgeBox.heightAnchor.constraint(equalToConstant: 32),
+                badgeBox.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -10),
+                badgeBox.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+                iv.widthAnchor.constraint(equalToConstant: 24),
+                iv.heightAnchor.constraint(equalToConstant: 24),
+                iv.centerXAnchor.constraint(equalTo: badgeBox.centerXAnchor),
+                iv.centerYAnchor.constraint(equalTo: badgeBox.centerYAnchor)
+            ])
         }
 
-        if item.kind == "color", let hex = item.text, let color = colorFromHex(hex) {
-            let swatch = NSView()
-            swatch.wantsLayer = true
-            swatch.layer?.backgroundColor = color.cgColor
-            swatch.layer?.cornerRadius = 4
-            swatch.layer?.borderWidth = 1
-            swatch.layer?.borderColor = NSColor.separatorColor.cgColor
-            swatch.translatesAutoresizingMaskIntoConstraints = false
-            swatch.widthAnchor.constraint(equalToConstant: 26).isActive = true
-            swatch.heightAnchor.constraint(equalToConstant: 26).isActive = true
-            row.addArrangedSubview(swatch)
+        // Body: the clip itself, Paste-style.
+        let body = NSStackView()
+        body.orientation = .vertical
+        body.alignment = .leading
+        body.spacing = 6
+        body.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(body)
+
+        func fullWidth(_ v: NSView) {
+            v.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
         }
 
-        // Main button: preview (click = paste back)
-        let main = NSButton()
-        main.bezelStyle = .inline
-        main.alignment = .left
-        main.target = self
-        main.action = #selector(itemClicked(_:))
-        main.identifier = NSUserInterfaceItemIdentifier(item.id)
-        let meta = (item.sourceApp.map { "\($0) · " } ?? "") + timeString(item.createdAt)
-        if item.kind == "image", let url = store.imageURL(for: item), let img = NSImage(contentsOf: url) {
-            img.size = NSSize(width: 44, height: 44)
-            main.image = img
-            main.title = "  Image — " + meta
-        } else if item.kind == "file", let path = item.filePath {
-            let icon = NSWorkspace.shared.icon(forFile: path)
-            icon.size = NSSize(width: 22, height: 22)
-            main.image = icon
-            main.title = " \(item.preview)   ·   \(meta)"
-            main.font = NSFont.systemFont(ofSize: 12)
-        } else {
-            let firstLine = item.preview.components(separatedBy: .newlines).first ?? ""
-            let truncated = firstLine.count > 90 ? String(firstLine.prefix(90)) + "…" : firstLine
-            main.title = truncated + "   ·   " + meta
-            main.font = NSFont.systemFont(ofSize: 12)
+        switch item.kind {
+        case "image":
+            let iv = NSImageView()
+            if let url = store.imageURL(for: item), let img = NSImage(contentsOf: url) {
+                iv.image = img
+            }
+            iv.imageScaling = .scaleProportionallyUpOrDown
+            iv.wantsLayer = true
+            iv.layer?.cornerRadius = 8
+            iv.layer?.masksToBounds = true
+            iv.layer?.backgroundColor = NSColor(white: 0.95, alpha: 1).cgColor
+            iv.translatesAutoresizingMaskIntoConstraints = false
+            iv.heightAnchor.constraint(equalToConstant: 130).isActive = true
+            body.addArrangedSubview(iv)
+            fullWidth(iv)
+            if let ocr = item.ocrText, !ocr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let ocrLabel = NSTextField(wrappingLabelWithString: ocr)
+                ocrLabel.font = NSFont.systemFont(ofSize: 11)
+                ocrLabel.textColor = .secondaryLabelColor
+                ocrLabel.maximumNumberOfLines = 2
+                ocrLabel.lineBreakMode = .byTruncatingTail
+                body.addArrangedSubview(ocrLabel)
+                fullWidth(ocrLabel)
+            }
+        case "file":
+            let row = NSStackView()
+            row.orientation = .horizontal
+            row.alignment = .centerY
+            row.spacing = 10
+            if let path = item.filePath {
+                let icon = NSWorkspace.shared.icon(forFile: path)
+                icon.size = NSSize(width: 34, height: 34)
+                row.addArrangedSubview(NSImageView(image: icon))
+            }
+            let texts = NSStackView()
+            texts.orientation = .vertical
+            texts.alignment = .leading
+            texts.spacing = 1
+            let name = NSTextField(labelWithString: item.preview)
+            name.font = NSFont.systemFont(ofSize: 12.5, weight: .semibold)
+            name.textColor = .labelColor
+            name.lineBreakMode = .byTruncatingTail
+            texts.addArrangedSubview(name)
+            if let path = item.filePath {
+                let p = NSTextField(labelWithString: (path as NSString).deletingLastPathComponent)
+                p.font = NSFont.systemFont(ofSize: 11)
+                p.textColor = .secondaryLabelColor
+                p.lineBreakMode = .byTruncatingMiddle
+                texts.addArrangedSubview(p)
+                p.widthAnchor.constraint(lessThanOrEqualTo: texts.widthAnchor).isActive = true
+            }
+            row.addArrangedSubview(texts)
+            body.addArrangedSubview(row)
+            fullWidth(row)
+        case "color":
+            if let hex = item.text, let color = colorFromHex(hex) {
+                let swatch = NSView()
+                swatch.wantsLayer = true
+                swatch.layer?.backgroundColor = color.cgColor
+                swatch.layer?.cornerRadius = 8
+                swatch.layer?.borderWidth = 1
+                swatch.layer?.borderColor = NSColor.separatorColor.cgColor
+                swatch.translatesAutoresizingMaskIntoConstraints = false
+                swatch.heightAnchor.constraint(equalToConstant: 54).isActive = true
+                body.addArrangedSubview(swatch)
+                fullWidth(swatch)
+            }
+        default:
+            let label = NSTextField(wrappingLabelWithString: item.preview)
+            label.font = NSFont.systemFont(ofSize: 13)
+            label.textColor = .labelColor
+            label.maximumNumberOfLines = 5
+            label.lineBreakMode = .byTruncatingTail
+            body.addArrangedSubview(label)
+            fullWidth(label)
         }
-        main.translatesAutoresizingMaskIntoConstraints = false
-        main.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        main.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        (main.cell as? NSButtonCell)?.lineBreakMode = .byTruncatingTail
-        row.addArrangedSubview(main)
 
-        let pin = NSButton(title: item.pinned ? "Unpin" : "Pin", target: self, action: #selector(pinClicked(_:)))
-        pin.bezelStyle = .rounded
-        pin.controlSize = .small
-        pin.identifier = NSUserInterfaceItemIdentifier(item.id)
-        row.addArrangedSubview(pin)
+        // Footer: actions left and right, Paste-style metadata centred.
+        let footer = NSView()
+        footer.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(footer)
+
+        let pin = cardFooterButton(item.pinned ? "Unpin" : "Pin", action: #selector(pinClicked(_:)), id: item.id, tip: item.pinned ? "Unpin" : "Pin")
+        footer.addSubview(pin)
 
         let boardButton = NSPopUpButton(frame: .zero, pullsDown: true)
-        boardButton.controlSize = .small
+        boardButton.isBordered = false
+        boardButton.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        boardButton.contentTintColor = .secondaryLabelColor
+        boardButton.toolTip = "Move to a pinboard"
         boardButton.identifier = NSUserInterfaceItemIdentifier(item.id)
-        let header = NSMenuItem(title: item.board.map { "🗂 \($0)" } ?? "Board…", action: nil, keyEquivalent: "")
-        boardButton.menu?.addItem(header)
+        boardButton.translatesAutoresizingMaskIntoConstraints = false
+        let headerItem = NSMenuItem(title: item.board.map { "🗂 \($0)" } ?? "🗂 Board", action: nil, keyEquivalent: "")
+        boardButton.menu?.addItem(headerItem)
         let noneItem = NSMenuItem(title: "No board", action: #selector(boardChosen(_:)), keyEquivalent: "")
         noneItem.target = self
         noneItem.identifier = NSUserInterfaceItemIdentifier(item.id)
@@ -779,21 +1071,62 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         newItem.target = self
         newItem.identifier = NSUserInterfaceItemIdentifier(item.id)
         boardButton.menu?.addItem(newItem)
-        row.addArrangedSubview(boardButton)
+        footer.addSubview(boardButton)
 
-        let stack = NSButton(title: "+ Stack", target: self, action: #selector(stackClicked(_:)))
-        stack.bezelStyle = .rounded
-        stack.controlSize = .small
-        stack.identifier = NSUserInterfaceItemIdentifier(item.id)
-        row.addArrangedSubview(stack)
+        let stack = cardFooterButton("+ Stack", action: #selector(stackClicked(_:)), id: item.id, tip: "Add to the Paste Stack")
+        footer.addSubview(stack)
+        let del = cardFooterButton("Delete", action: #selector(deleteClicked(_:)), id: item.id, tip: "Delete this clip")
+        footer.addSubview(del)
 
-        let del = NSButton(title: "✕", target: self, action: #selector(deleteClicked(_:)))
-        del.bezelStyle = .rounded
-        del.controlSize = .small
-        del.identifier = NSUserInterfaceItemIdentifier(item.id)
-        row.addArrangedSubview(del)
+        let meta = NSTextField(labelWithString: footerText(for: item))
+        meta.font = NSFont.systemFont(ofSize: 11)
+        meta.textColor = .secondaryLabelColor
+        meta.alignment = .center
+        meta.lineBreakMode = .byTruncatingTail
+        meta.translatesAutoresizingMaskIntoConstraints = false
+        footer.addSubview(meta)
 
-        return row
+        // Invisible click target over header + body: click a card to paste it.
+        let click = NSButton()
+        click.isBordered = false
+        click.title = ""
+        click.target = self
+        click.action = #selector(itemClicked(_:))
+        click.identifier = NSUserInterfaceItemIdentifier(item.id)
+        click.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(click)
+
+        NSLayoutConstraint.activate([
+            body.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 10),
+            body.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 12),
+            body.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -12),
+
+            footer.topAnchor.constraint(equalTo: body.bottomAnchor, constant: 8),
+            footer.leadingAnchor.constraint(equalTo: card.leadingAnchor),
+            footer.trailingAnchor.constraint(equalTo: card.trailingAnchor),
+            footer.heightAnchor.constraint(equalToConstant: 28),
+            footer.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -4),
+
+            click.topAnchor.constraint(equalTo: card.topAnchor),
+            click.leadingAnchor.constraint(equalTo: card.leadingAnchor),
+            click.trailingAnchor.constraint(equalTo: card.trailingAnchor),
+            click.bottomAnchor.constraint(equalTo: footer.topAnchor),
+
+            pin.leadingAnchor.constraint(equalTo: footer.leadingAnchor, constant: 10),
+            pin.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
+            boardButton.leadingAnchor.constraint(equalTo: pin.trailingAnchor, constant: 8),
+            boardButton.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
+            del.trailingAnchor.constraint(equalTo: footer.trailingAnchor, constant: -10),
+            del.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
+            stack.trailingAnchor.constraint(equalTo: del.leadingAnchor, constant: -8),
+            stack.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
+            meta.centerXAnchor.constraint(equalTo: footer.centerXAnchor),
+            meta.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
+            meta.leadingAnchor.constraint(greaterThanOrEqualTo: boardButton.trailingAnchor, constant: 8),
+            meta.trailingAnchor.constraint(lessThanOrEqualTo: stack.leadingAnchor, constant: -8)
+        ])
+
+        return card
     }
 
     // MARK: Actions
