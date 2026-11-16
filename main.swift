@@ -82,9 +82,21 @@ final class ClipStore {
     }
 
     func load() {
-        guard let data = try? Data(contentsOf: fileURL),
-              let decoded = try? JSONDecoder().decode([ClipItem].self, from: data) else { return }
-        items = decoded
+        guard let data = try? Data(contentsOf: fileURL) else { return }
+        if let decoded = try? JSONDecoder().decode([ClipItem].self, from: data) {
+            items = decoded
+            return
+        }
+        // Lossy fallback: decode clip by clip so one malformed entry
+        // can't silently blank the whole history (the strict decode
+        // above fails atomically — every clip or none).
+        if let raw = try? JSONSerialization.jsonObject(with: data) as? [Any] {
+            let decoder = JSONDecoder()
+            items = raw.compactMap { entry in
+                guard let entryData = try? JSONSerialization.data(withJSONObject: entry) else { return nil }
+                return try? decoder.decode(ClipItem.self, from: entryData)
+            }
+        }
     }
 
     func save() {
@@ -151,6 +163,13 @@ final class ClipStore {
         }
         items = kept
     }
+}
+
+// Top-down document view for the panel's scroll view: with
+// isFlipped, the clip list grows downward from the top like a
+// normal feed instead of upward from the bottom.
+final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
 }
 
 // Cheap FNV-1a hash, used to dedupe identical images.
@@ -940,19 +959,27 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         listStack.spacing = 12
         listStack.translatesAutoresizingMaskIntoConstraints = false
 
-        let clipView = NSView()
+        let clipView = FlippedView()
         clipView.addSubview(listStack)
         scrollView.documentView = clipView
         NSLayoutConstraint.activate([
             listStack.leadingAnchor.constraint(equalTo: clipView.leadingAnchor, constant: 12),
             listStack.trailingAnchor.constraint(equalTo: clipView.trailingAnchor, constant: -12),
             listStack.topAnchor.constraint(equalTo: clipView.topAnchor, constant: 12),
-            listStack.bottomAnchor.constraint(lessThanOrEqualTo: clipView.bottomAnchor, constant: -12),
-            clipView.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor)
+            // Equality, not ≤: the document view's height must be
+            // driven by the stack's content height. With ≤ the
+            // solver was free to collapse the document view to zero
+            // height, and every row was clipped away — the panel
+            // looked empty while the history on disk was full.
+            listStack.bottomAnchor.constraint(equalTo: clipView.bottomAnchor, constant: -12),
+            clipView.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
+            clipView.heightAnchor.constraint(greaterThanOrEqualTo: scrollView.contentView.heightAnchor)
         ])
 
         emptyLabel = NSTextField(labelWithString: "Nothing here yet — copy something and it will show up.")
         emptyLabel.textColor = .secondaryLabelColor
+        emptyLabel.maximumNumberOfLines = 3
+        emptyLabel.alignment = .center
         emptyLabel.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(emptyLabel)
 
@@ -979,6 +1006,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             limitPopup.menu?.addItem(item)
         }
         limitPopup.selectItem(at: [200, 500, 1000, 0].firstIndex(of: store.historyLimit) ?? 0)
+        limitPopup.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         limitPopup.translatesAutoresizingMaskIntoConstraints = false
         limitPopup.identifier = NSUserInterfaceItemIdentifier("limitPopup")
         content.addSubview(limitPopup)
@@ -995,7 +1023,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         content.addSubview(hint)
 
         NSLayoutConstraint.activate([
-            searchField.topAnchor.constraint(equalTo: content.topAnchor, constant: 10),
+            // The safe area starts below the title bar; anchoring to
+            // content.topAnchor put the search field underneath it
+            // (the panel uses .fullSizeContentView), where it was
+            // hidden except for its focus ring.
+            searchField.topAnchor.constraint(equalTo: content.safeAreaLayoutGuide.topAnchor, constant: 10),
             searchField.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
             searchField.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -10),
 
@@ -1024,6 +1056,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
             emptyLabel.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
             emptyLabel.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
+            emptyLabel.widthAnchor.constraint(lessThanOrEqualTo: scrollView.widthAnchor, constant: -48),
 
             hint.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
             hint.bottomAnchor.constraint(equalTo: clearButton.topAnchor, constant: -6),
@@ -1036,6 +1069,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             excludedButton.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10),
             limitPopup.leadingAnchor.constraint(equalTo: excludedButton.trailingAnchor, constant: 8),
             limitPopup.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10),
+            // Keep the Limit popup from colliding with Quit at the
+            // panel's minimum width (they overlapped before).
+            limitPopup.trailingAnchor.constraint(lessThanOrEqualTo: quitButton.leadingAnchor, constant: -8),
             quitButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -10),
             quitButton.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10)
         ])
@@ -1217,6 +1253,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
         let items = visibleItems()
         emptyLabel.isHidden = !items.isEmpty
+        if items.isEmpty {
+            // Say WHY the list is empty. The old single message
+            // ("copy something…") also appeared when filters were
+            // hiding a full history, which read as lost data.
+            emptyLabel.stringValue = store.items.isEmpty
+                ? "Nothing here yet — copy something and it will show up."
+                : "Nothing matches the current search or filters.\n\(store.items.count) clip\(store.items.count == 1 ? "" : "s") in history — clear the search or widen the filters to see them."
+        }
 
         if boardFilter == nil {
             let pinned = items.filter { $0.pinned }
