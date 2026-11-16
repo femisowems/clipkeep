@@ -406,10 +406,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.minSize = NSSize(width: 420, height: 440)
+        panel.contentMinSize = NSSize(width: 420, height: 400)
         // Remember the size and position the user leaves it at, and
         // restore them on the next launch instead of re-centering.
-        panel.setFrameAutosaveName("ClipKeepPanel")
-        if !panel.setFrameUsingName("ClipKeepPanel") {
+        // The autosave name is versioned (…V2): earlier builds shared
+        // the "ClipKeepPanel" name, and a degenerate frame saved under
+        // it (a ~60pt-wide, full-height strip) came back verbatim —
+        // setFrameUsingName does not clamp the restored frame to
+        // minSize. Validate whatever was restored and fall back to
+        // the default size when it is unusable.
+        let autosaveName = "ClipKeepPanelV2"
+        panel.setFrameAutosaveName(autosaveName)
+        let restored = panel.setFrameUsingName(autosaveName)
+        let f = panel.frame
+        let onScreen = NSScreen.screens.contains { $0.visibleFrame.intersects(f) }
+        if !restored || f.width < panel.minSize.width || f.height < panel.minSize.height || !onScreen {
+            panel.setFrame(NSRect(x: 0, y: 0, width: 480, height: 640), display: false)
             panel.center()
         }
 
