@@ -172,6 +172,25 @@ final class FlippedView: NSView {
     override var isFlipped: Bool { true }
 }
 
+// Click target laid over a card: left-click pastes the clip,
+// right-click presents the card's context menu. An NSButton
+// overlay was used before, but buttons swallow right-clicks
+// without ever presenting their menu — the card menu existed
+// all along and simply never opened.
+final class ClickView: NSView {
+    var onClick: (() -> Void)?
+    override func mouseDown(with event: NSEvent) {
+        onClick?()
+    }
+    override func rightMouseDown(with event: NSEvent) {
+        if let menu {
+            NSMenu.popUpContextMenu(menu, with: event, for: self)
+        } else {
+            super.rightMouseDown(with: event)
+        }
+    }
+}
+
 // Cheap FNV-1a hash, used to dedupe identical images.
 func fnvHash(_ data: Data) -> String {
     var hash: UInt64 = 14695981039346656037
@@ -240,8 +259,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             button.title = "📋"
-            button.action = #selector(togglePanel)
+            button.action = #selector(statusItemClicked)
             button.target = self
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
 
         buildPanel()
@@ -928,6 +948,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         let filterBar = NSStackView(views: [boardPopup, appPopup, recencyPopup])
         filterBar.orientation = .horizontal
         filterBar.spacing = 8
+        filterBar.heightAnchor.constraint(equalToConstant: 26).isActive = true
         filterBar.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(filterBar)
 
@@ -960,6 +981,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         listStack.translatesAutoresizingMaskIntoConstraints = false
 
         let clipView = FlippedView()
+        // This opt-out was missing in every build up to 2.2.1: the
+        // document view kept its autoresizing constraints and
+        // fought the Auto Layout ones, and AppKit broke a
+        // different constraint on each launch — the list came out
+        // as a ~60pt strip, zero-height (empty panel), or
+        // squished into a corner, while capture worked throughout.
+        clipView.translatesAutoresizingMaskIntoConstraints = false
         clipView.addSubview(listStack)
         scrollView.documentView = clipView
         NSLayoutConstraint.activate([
@@ -995,6 +1023,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
         let excludedButton = NSButton(title: "Excluded apps…", target: self, action: #selector(showExclusions))
         excludedButton.bezelStyle = .rounded
+        excludedButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         excludedButton.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(excludedButton)
 
@@ -1006,7 +1035,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             limitPopup.menu?.addItem(item)
         }
         limitPopup.selectItem(at: [200, 500, 1000, 0].firstIndex(of: store.historyLimit) ?? 0)
-        limitPopup.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        limitPopup.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
         limitPopup.translatesAutoresizingMaskIntoConstraints = false
         limitPopup.identifier = NSUserInterfaceItemIdentifier("limitPopup")
         content.addSubview(limitPopup)
@@ -1016,7 +1045,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         quitButton.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(quitButton)
 
-        let hint = NSTextField(labelWithString: "Click an item to paste it · ⌘1–9 quick-pastes · ⌘⇧V toggles this panel")
+        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+        let hint = NSTextField(labelWithString: "Click an item to paste it · ⌘1–9 quick-pastes · ⌘⇧V toggles this panel" + (appVersion.isEmpty ? "" : " · v\(appVersion)"))
         hint.font = NSFont.systemFont(ofSize: 11)
         hint.textColor = .secondaryLabelColor
         hint.translatesAutoresizingMaskIntoConstraints = false
@@ -1680,12 +1710,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         footer.addSubview(meta)
 
         // Invisible click target over header + body: click a card to paste it.
-        let click = NSButton()
-        click.isBordered = false
-        click.title = ""
-        click.target = self
-        click.action = #selector(itemClicked(_:))
+        let click = ClickView()
         click.identifier = NSUserInterfaceItemIdentifier(item.id)
+        click.onClick = { [weak self] in self?.pasteBack(item) }
         click.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(click)
 
@@ -1958,6 +1985,46 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     }
 
     // MARK: Panel toggle + hotkeys
+
+    @objc func statusItemClicked() {
+        if NSApp.currentEvent?.type == .rightMouseUp {
+            showStatusMenu()
+        } else {
+            togglePanel()
+        }
+    }
+
+    // Right-click menu for the menu-bar icon: quit the app, pause
+    // or resume capture, or check for updates — without opening
+    // the panel first.
+    func showStatusMenu() {
+        guard let button = statusItem.button, let event = NSApp.currentEvent else { return }
+        let menu = NSMenu()
+        func add(_ title: String, _ action: Selector) {
+            let mi = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            mi.target = self
+            menu.addItem(mi)
+        }
+        add("Open ClipKeep", #selector(openPanel))
+        add(capturePaused ? "Resume Capture" : "Pause Capture", #selector(togglePause))
+        add("Check for Updates…", #selector(checkForUpdateClicked))
+        menu.addItem(.separator())
+        add("Quit ClipKeep", #selector(quitApp))
+        NSMenu.popUpContextMenu(menu, with: event, for: button)
+    }
+
+    @objc func openPanel() {
+        if panel.isVisible {
+            panel.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        } else {
+            togglePanel()
+        }
+    }
+
+    @objc func checkForUpdateClicked() {
+        checkForUpdate()
+    }
 
     @objc func togglePanel() {
         if panel.isVisible {
