@@ -59,6 +59,17 @@ safekeeping. The app itself is called ClipKeep.)*
   colour itself), the source app's icon in a badge, relative times
   ("4 hours ago"), and Paste-style footers — character counts, image
   dimensions, file sizes.
+- **Link previews** (v2.2) — copied links fetch the page title and
+  preview image in the background and render as rich cards.
+- **Preview & edit** — the eye button on a card (or right-click →
+  Preview / Edit) opens any clip full-size; text clips can be edited
+  and saved in place.
+- **Right-click menu** on every card: Paste, Copy, Preview / Edit,
+  Pin, Move to Board, Add to Paste Stack, Delete.
+- **Update checker** — at launch the app checks a tiny public version
+  feed and banners new releases at the top of the panel.
+- **Search filters** — by source app and recency (Today / 7 / 30
+  days), next to the pinboard filter.
 
 ## Requirements
 

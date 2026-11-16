@@ -29,6 +29,9 @@ struct ClipItem: Codable {
     var ocrText: String?      // recognized text (image clips)
     var board: String?        // pinboard name, if filed
     var contentHash: String?  // image dedupe
+    var linkTitle: String? = nil     // fetched page title (link clips)
+    var linkImageFile: String? = nil // fetched preview image filename (link clips)
+    var linkChecked: Bool? = nil     // a preview fetch has been attempted
 
     var preview: String {
         switch kind {
@@ -97,6 +100,7 @@ final class ClipStore {
 
     private func deleteImageFile(of item: ClipItem) {
         if let url = imageURL(for: item) { try? FileManager.default.removeItem(at: url) }
+        if let name = item.linkImageFile { try? FileManager.default.removeItem(at: imagesDir.appendingPathComponent(name)) }
     }
 
     // Insert at top, de-duplicating identical unpinned, unboarded clips.
@@ -187,6 +191,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     var searchField: NSSearchField!
     var typeControl: NSSegmentedControl!
     var boardPopup: NSPopUpButton!
+    var appPopup: NSPopUpButton!
+    var recencyPopup: NSPopUpButton!
     var stackBar: NSStackView!
     var stackLabel: NSTextField!
     var listStack: NSStackView!
@@ -220,6 +226,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         }
 
         buildPanel()
+        checkForUpdate()
         registerHotKeys()
         installKeyMonitor()
 
@@ -313,11 +320,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         // Plain text.
         if let text = pb.string(forType: .string), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             if store.items.first?.kind == "text" && store.items.first?.text == text { return }
-            store.insert(ClipItem(id: UUID().uuidString, kind: "text", text: text,
-                                  imageFile: nil, createdAt: now, pinned: false, filePath: nil,
-                                  sourceApp: sourceName, sourceBundleID: sourceBundle,
-                                  ocrText: nil, board: nil, contentHash: nil))
+            let newItem = ClipItem(id: UUID().uuidString, kind: "text", text: text,
+                                   imageFile: nil, createdAt: now, pinned: false, filePath: nil,
+                                   sourceApp: sourceName, sourceBundleID: sourceBundle,
+                                   ocrText: nil, board: nil, contentHash: nil)
+            store.insert(newItem)
             refreshList()
+            enrichLinkIfNeeded(newItem)
         }
     }
 
@@ -341,7 +350,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
     // MARK: Paste back + Paste Stack
 
-    func pasteBack(_ item: ClipItem) {
+    func writeToPasteboard(_ item: ClipItem) {
         let pb = NSPasteboard.general
         pb.clearContents()
         switch item.kind {
@@ -364,6 +373,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             break
         }
         selfWriteChangeCount = pb.changeCount
+    }
+
+    // Copy without pasting: the clip goes on the clipboard and the
+    // panel stays open. The poller ignores the change because
+    // writeToPasteboard records it as our own write.
+    func copyBack(_ item: ClipItem) {
+        writeToPasteboard(item)
+    }
+
+    func pasteBack(_ item: ClipItem) {
+        writeToPasteboard(item)
         panel.orderOut(nil)
 
         // If Accessibility is granted, press ⌘V in the app underneath
@@ -392,6 +412,430 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                 return
             }
         }
+        refreshList()
+    }
+
+    // MARK: Link previews
+
+    var linkFetchesInFlight: Set<String> = []
+
+    // Fetch a link clip's page title and preview image once, in the
+    // background, and file them on the item. Runs when a link is
+    // copied, and lazily when an unchecked link card is rendered.
+    func enrichLinkIfNeeded(_ item: ClipItem) {
+        guard isLinkItem(item), item.linkChecked != true,
+              !linkFetchesInFlight.contains(item.id),
+              let raw = item.text,
+              let url = URL(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)) else { return }
+        linkFetchesInFlight.insert(item.id)
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 8
+        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15", forHTTPHeaderField: "User-Agent")
+        URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
+            guard let self else { return }
+            var title: String?
+            var imageURL: URL?
+            if let data, let html = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) {
+                title = self.metaContent(html, keys: ["og:title", "twitter:title"]) ?? self.pageTitle(html)
+                if let ref = self.metaContent(html, keys: ["og:image", "twitter:image"]) {
+                    imageURL = URL(string: ref, relativeTo: url)?.absoluteURL
+                }
+            }
+            guard let imageURL else {
+                self.finishLinkFetch(id: item.id, title: title, imageFile: nil)
+                return
+            }
+            var imgRequest = URLRequest(url: imageURL)
+            imgRequest.timeoutInterval = 8
+            URLSession.shared.dataTask(with: imgRequest) { [weak self] imgData, _, _ in
+                guard let self else { return }
+                var imageFile: String?
+                if let imgData, imgData.count <= 3_000_000, NSImage(data: imgData) != nil {
+                    let name = "link-\(item.id).png"
+                    try? imgData.write(to: self.store.imagesDir.appendingPathComponent(name))
+                    imageFile = name
+                }
+                self.finishLinkFetch(id: item.id, title: title, imageFile: imageFile)
+            }.resume()
+        }.resume()
+    }
+
+    private func finishLinkFetch(id: String, title: String?, imageFile: String?) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.linkFetchesInFlight.remove(id)
+            guard let idx = self.store.items.firstIndex(where: { $0.id == id }) else { return }
+            self.store.items[idx].linkChecked = true
+            if let title, !title.isEmpty { self.store.items[idx].linkTitle = title }
+            if let imageFile { self.store.items[idx].linkImageFile = imageFile }
+            self.store.save()
+            self.refreshList()
+        }
+    }
+
+    private func metaContent(_ html: String, keys: [String]) -> String? {
+        for key in keys {
+            let patterns = [
+                "<meta[^>]+(?:property|name)\\s*=\\s*[\"']\(key)[\"'][^>]*content\\s*=\\s*[\"']([^\"']+)[\"']",
+                "<meta[^>]+content\\s*=\\s*[\"']([^\"']+)[\"'][^>]+(?:property|name)\\s*=\\s*[\"']\(key)[\"']"
+            ]
+            for pattern in patterns {
+                if let value = firstCapture(html, pattern: pattern) { return decodeHTMLEntities(value) }
+            }
+        }
+        return nil
+    }
+
+    private func pageTitle(_ html: String) -> String? {
+        guard let value = firstCapture(html, pattern: "<title[^>]*>([^<]+)</title>") else { return nil }
+        return decodeHTMLEntities(value)
+    }
+
+    private func firstCapture(_ string: String, pattern: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]),
+              let match = regex.firstMatch(in: string, range: NSRange(string.startIndex..., in: string)),
+              match.numberOfRanges > 1,
+              let range = Range(match.range(at: 1), in: string) else { return nil }
+        let value = String(string[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
+
+    private func decodeHTMLEntities(_ string: String) -> String {
+        var result = string
+        for (entity, replacement) in [("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", "\""), ("&#39;", "'"), ("&apos;", "'"), ("&nbsp;", " ")] {
+            result = result.replacingOccurrences(of: entity, with: replacement)
+        }
+        return result
+    }
+
+    // MARK: Update checker
+
+    // The keepsake repo is private, so the app cannot read its
+    // releases anonymously. A tiny public gist carries the latest
+    // version instead; it is bumped as part of each release.
+    static let updateFeedURL = "https://gist.githubusercontent.com/femisowems/114759138a0c643983d577960363096a/raw/clipkeep-version.json"
+    var availableUpdate: (version: String, url: String)?
+
+    func checkForUpdate() {
+        guard let feed = URL(string: AppController.updateFeedURL) else { return }
+        var request = URLRequest(url: feed)
+        request.timeoutInterval = 6
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
+            guard let self, let data,
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let latest = obj["latest"] as? String,
+                  let url = obj["url"] as? String else { return }
+            let current = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+            guard latest.compare(current, options: .numeric) == .orderedDescending else { return }
+            DispatchQueue.main.async {
+                self.availableUpdate = (latest, url)
+                self.refreshList()
+            }
+        }.resume()
+    }
+
+    func updateBanner(version: String) -> NSView {
+        let banner = NSView()
+        banner.wantsLayer = true
+        banner.layer?.backgroundColor = NSColor(red: 0.890, green: 0.945, blue: 1.0, alpha: 1).cgColor
+        banner.layer?.cornerRadius = 10
+        banner.translatesAutoresizingMaskIntoConstraints = false
+        let label = NSTextField(labelWithString: "ClipKeep \(version) is available")
+        label.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        label.textColor = NSColor(red: 0.05, green: 0.30, blue: 0.65, alpha: 1)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        banner.addSubview(label)
+        let download = NSButton(title: "Download", target: self, action: #selector(updateDownloadClicked))
+        download.bezelStyle = .rounded
+        download.controlSize = .small
+        download.translatesAutoresizingMaskIntoConstraints = false
+        banner.addSubview(download)
+        let dismiss = NSButton(title: "Dismiss", target: self, action: #selector(updateDismissClicked))
+        dismiss.bezelStyle = .inline
+        dismiss.isBordered = false
+        dismiss.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        dismiss.contentTintColor = .secondaryLabelColor
+        dismiss.translatesAutoresizingMaskIntoConstraints = false
+        banner.addSubview(dismiss)
+        NSLayoutConstraint.activate([
+            banner.heightAnchor.constraint(equalToConstant: 36),
+            label.leadingAnchor.constraint(equalTo: banner.leadingAnchor, constant: 12),
+            label.centerYAnchor.constraint(equalTo: banner.centerYAnchor),
+            dismiss.trailingAnchor.constraint(equalTo: banner.trailingAnchor, constant: -10),
+            dismiss.centerYAnchor.constraint(equalTo: banner.centerYAnchor),
+            download.trailingAnchor.constraint(equalTo: dismiss.leadingAnchor, constant: -8),
+            download.centerYAnchor.constraint(equalTo: banner.centerYAnchor),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: download.leadingAnchor, constant: -8)
+        ])
+        return banner
+    }
+
+    @objc func updateDownloadClicked() {
+        if let upd = availableUpdate, let url = URL(string: upd.url) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    @objc func updateDismissClicked() {
+        if let upd = availableUpdate {
+            UserDefaults.standard.set(upd.version, forKey: "dismissedUpdateVersion")
+        }
+        refreshList()
+    }
+
+    // MARK: Preview / edit
+
+    var previewWindow: NSWindow?
+    var previewItemID: String?
+    var previewTextView: NSTextView?
+
+    @objc func previewClicked(_ sender: NSButton) {
+        guard let item = item(for: sender) else { return }
+        openPreview(for: item)
+    }
+
+    func openPreview(for item: ClipItem) {
+        if previewWindow == nil {
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 580, height: 520),
+                                  styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+            window.appearance = NSAppearance(named: .aqua)
+            window.isReleasedWhenClosed = false
+            window.minSize = NSSize(width: 420, height: 320)
+            previewWindow = window
+        }
+        guard let window = previewWindow else { return }
+        previewItemID = item.id
+        window.title = "\(typeLabel(for: item)) — \(relativeTimeString(item.createdAt))"
+        window.contentView = previewContent(for: item)
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func previewContent(for item: ClipItem) -> NSView {
+        let content = NSView()
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 10
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 14),
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -14)
+        ])
+        func fullWidth(_ v: NSView) { v.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true }
+
+        switch item.kind {
+        case "image":
+            if let url = store.imageURL(for: item), let img = NSImage(contentsOf: url) {
+                let iv = NSImageView(image: img)
+                iv.imageScaling = .scaleProportionallyUpOrDown
+                iv.translatesAutoresizingMaskIntoConstraints = false
+                iv.heightAnchor.constraint(equalToConstant: 300).isActive = true
+                stack.addArrangedSubview(iv)
+                fullWidth(iv)
+            }
+            if let ocr = item.ocrText, !ocr.isEmpty {
+                let label = NSTextField(wrappingLabelWithString: ocr)
+                label.isSelectable = true
+                label.font = NSFont.systemFont(ofSize: 12)
+                label.textColor = .secondaryLabelColor
+                stack.addArrangedSubview(label)
+                fullWidth(label)
+            }
+        case "file":
+            if let path = item.filePath {
+                let icon = NSWorkspace.shared.icon(forFile: path)
+                icon.size = NSSize(width: 64, height: 64)
+                stack.addArrangedSubview(NSImageView(image: icon))
+                let name = NSTextField(labelWithString: item.preview)
+                name.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
+                stack.addArrangedSubview(name)
+                let pathLabel = NSTextField(wrappingLabelWithString: path)
+                pathLabel.isSelectable = true
+                pathLabel.font = NSFont.systemFont(ofSize: 12)
+                pathLabel.textColor = .secondaryLabelColor
+                stack.addArrangedSubview(pathLabel)
+                fullWidth(pathLabel)
+            }
+        case "color":
+            if let hex = item.text, let color = colorFromHex(hex) {
+                let swatch = NSView()
+                swatch.wantsLayer = true
+                swatch.layer?.backgroundColor = color.cgColor
+                swatch.layer?.cornerRadius = 10
+                swatch.layer?.borderWidth = 1
+                swatch.layer?.borderColor = NSColor.separatorColor.cgColor
+                swatch.translatesAutoresizingMaskIntoConstraints = false
+                swatch.heightAnchor.constraint(equalToConstant: 160).isActive = true
+                stack.addArrangedSubview(swatch)
+                fullWidth(swatch)
+                let hexLabel = NSTextField(labelWithString: hex.uppercased())
+                hexLabel.font = NSFont.monospacedSystemFont(ofSize: 16, weight: .medium)
+                hexLabel.isSelectable = true
+                stack.addArrangedSubview(hexLabel)
+            }
+        default:
+            let scroll = NSScrollView()
+            scroll.hasVerticalScroller = true
+            scroll.borderType = .bezelBorder
+            scroll.translatesAutoresizingMaskIntoConstraints = false
+            scroll.heightAnchor.constraint(equalToConstant: 300).isActive = true
+            let textView = NSTextView()
+            textView.string = item.text ?? ""
+            textView.font = NSFont.systemFont(ofSize: 13)
+            textView.isRichText = false
+            textView.isAutomaticQuoteSubstitutionEnabled = false
+            textView.minSize = NSSize(width: 0, height: 0)
+            textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+            textView.isVerticallyResizable = true
+            textView.isHorizontallyResizable = false
+            textView.autoresizingMask = [.width]
+            textView.textContainer?.widthTracksTextView = true
+            scroll.documentView = textView
+            previewTextView = textView
+            stack.addArrangedSubview(scroll)
+            fullWidth(scroll)
+            let note = NSTextField(labelWithString: "Edit the text and Save, or Paste it as-is.")
+            note.font = NSFont.systemFont(ofSize: 11)
+            note.textColor = .secondaryLabelColor
+            stack.addArrangedSubview(note)
+        }
+
+        let buttons = NSStackView()
+        buttons.orientation = .horizontal
+        buttons.spacing = 8
+        let paste = NSButton(title: "Paste", target: self, action: #selector(previewPasteClicked))
+        paste.bezelStyle = .rounded
+        buttons.addArrangedSubview(paste)
+        let copy = NSButton(title: "Copy", target: self, action: #selector(previewCopyClicked))
+        copy.bezelStyle = .rounded
+        buttons.addArrangedSubview(copy)
+        if item.kind == "file" {
+            let reveal = NSButton(title: "Reveal in Finder", target: self, action: #selector(previewRevealClicked))
+            reveal.bezelStyle = .rounded
+            buttons.addArrangedSubview(reveal)
+        }
+        if item.kind == "text" {
+            let save = NSButton(title: "Save changes", target: self, action: #selector(previewSaveClicked))
+            save.bezelStyle = .rounded
+            buttons.addArrangedSubview(save)
+        }
+        stack.addArrangedSubview(buttons)
+        return content
+    }
+
+    private func previewItem() -> ClipItem? {
+        guard let id = previewItemID else { return nil }
+        return store.items.first { $0.id == id }
+    }
+
+    @objc func previewPasteClicked() {
+        guard let item = previewItem() else { return }
+        previewWindow?.orderOut(nil)
+        pasteBack(item)
+    }
+
+    @objc func previewCopyClicked() {
+        guard let item = previewItem() else { return }
+        copyBack(item)
+    }
+
+    @objc func previewRevealClicked() {
+        guard let item = previewItem(), let path = item.filePath else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+    }
+
+    @objc func previewSaveClicked() {
+        guard let id = previewItemID, let textView = previewTextView,
+              let idx = store.items.firstIndex(where: { $0.id == id }) else { return }
+        let newText = textView.string
+        guard newText != store.items[idx].text else { previewWindow?.orderOut(nil); return }
+        let wasLink = isLinkItem(store.items[idx])
+        store.items[idx].text = newText
+        if wasLink {
+            // The URL may have changed — drop the fetched preview
+            // and fetch the new page afresh.
+            if let name = store.items[idx].linkImageFile {
+                try? FileManager.default.removeItem(at: store.imagesDir.appendingPathComponent(name))
+            }
+            store.items[idx].linkTitle = nil
+            store.items[idx].linkImageFile = nil
+            store.items[idx].linkChecked = nil
+        }
+        store.save()
+        refreshList()
+        if let updated = store.items.first(where: { $0.id == id }) { enrichLinkIfNeeded(updated) }
+        previewWindow?.orderOut(nil)
+    }
+
+    // MARK: Card context menu
+
+    func cardMenu(for item: ClipItem) -> NSMenu {
+        let menu = NSMenu()
+        func add(_ title: String, _ action: Selector) {
+            let mi = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            mi.target = self
+            mi.identifier = NSUserInterfaceItemIdentifier(item.id)
+            menu.addItem(mi)
+        }
+        add("Paste", #selector(menuPaste(_:)))
+        add("Copy", #selector(menuCopy(_:)))
+        add("Preview / Edit…", #selector(menuPreview(_:)))
+        menu.addItem(NSMenuItem.separator())
+        add(item.pinned ? "Unpin" : "Pin", #selector(menuPin(_:)))
+        let boardItem = NSMenuItem(title: "Move to Board", action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        let none = NSMenuItem(title: "No board", action: #selector(boardChosen(_:)), keyEquivalent: "")
+        none.target = self
+        none.identifier = NSUserInterfaceItemIdentifier(item.id)
+        none.representedObject = nil as String?
+        sub.addItem(none)
+        for name in store.boards {
+            let mi = NSMenuItem(title: name, action: #selector(boardChosen(_:)), keyEquivalent: "")
+            mi.target = self
+            mi.identifier = NSUserInterfaceItemIdentifier(item.id)
+            mi.representedObject = name
+            sub.addItem(mi)
+        }
+        sub.addItem(NSMenuItem.separator())
+        let newB = NSMenuItem(title: "New board…", action: #selector(newBoardChosen(_:)), keyEquivalent: "")
+        newB.target = self
+        newB.identifier = NSUserInterfaceItemIdentifier(item.id)
+        sub.addItem(newB)
+        boardItem.submenu = sub
+        menu.addItem(boardItem)
+        add("Add to Paste Stack", #selector(menuStack(_:)))
+        menu.addItem(NSMenuItem.separator())
+        add("Delete", #selector(menuDelete(_:)))
+        return menu
+    }
+
+    @objc func menuPaste(_ sender: NSMenuItem) { if let i = item(for: sender) { pasteBack(i) } }
+    @objc func menuCopy(_ sender: NSMenuItem) { if let i = item(for: sender) { copyBack(i) } }
+    @objc func menuPreview(_ sender: NSMenuItem) { if let i = item(for: sender) { openPreview(for: i) } }
+    @objc func menuPin(_ sender: NSMenuItem) { if let i = item(for: sender) { togglePin(id: i.id) } }
+    @objc func menuStack(_ sender: NSMenuItem) {
+        if let f = item(for: sender), !stackIDs.contains(f.id) { stackIDs.append(f.id) }
+        refreshList()
+    }
+    @objc func menuDelete(_ sender: NSMenuItem) {
+        if let f = item(for: sender) { store.remove(f); store.save() }
+        refreshList()
+    }
+
+    func togglePin(id: String) {
+        guard let idx = store.items.firstIndex(where: { $0.id == id }) else { return }
+        store.items[idx].pinned.toggle()
+        store.items.sort { a, b in
+            if a.pinned != b.pinned { return a.pinned && !b.pinned }
+            return a.createdAt > b.createdAt
+        }
+        store.save()
         refreshList()
     }
 
@@ -441,6 +885,32 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         boardPopup.action = #selector(filterChanged)
         boardPopup.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(boardPopup)
+
+        appPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        appPopup.controlSize = .small
+        appPopup.target = self
+        appPopup.action = #selector(filterChanged)
+        appPopup.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(appPopup)
+
+        recencyPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        recencyPopup.controlSize = .small
+        for (title, days) in [("All time", 0), ("Today", -1), ("Last 7 days", 7), ("Last 30 days", 30)] {
+            let mi = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            mi.representedObject = days
+            recencyPopup.menu?.addItem(mi)
+        }
+        recencyPopup.target = self
+        recencyPopup.action = #selector(filterChanged)
+        recencyPopup.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(recencyPopup)
+
+        // Second filter row: board / source app / recency.
+        let filterBar = NSStackView(views: [boardPopup, appPopup, recencyPopup])
+        filterBar.orientation = .horizontal
+        filterBar.spacing = 8
+        filterBar.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(filterBar)
 
         // Paste Stack bar (visible only while the stack has items).
         stackLabel = NSTextField(labelWithString: "")
@@ -531,11 +1001,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
             typeControl.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 8),
             typeControl.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
-            boardPopup.centerYAnchor.constraint(equalTo: typeControl.centerYAnchor),
-            boardPopup.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -10),
-            boardPopup.leadingAnchor.constraint(greaterThanOrEqualTo: typeControl.trailingAnchor, constant: 8),
+            typeControl.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -10),
 
-            stackBar.topAnchor.constraint(equalTo: typeControl.bottomAnchor, constant: 8),
+            filterBar.topAnchor.constraint(equalTo: typeControl.bottomAnchor, constant: 8),
+            filterBar.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
+            filterBar.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -10),
+
+            stackBar.topAnchor.constraint(equalTo: filterBar.bottomAnchor, constant: 8),
             stackBar.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
             stackBar.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -10),
 
@@ -638,6 +1110,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         return item.representedObject as? String
     }
 
+    var appFilter: String? {
+        guard let item = appPopup?.selectedItem else { return nil }
+        return item.representedObject as? String
+    }
+
+    // nil = all time; -1 in the popup means "today" (start of day).
+    var recencyCutoff: Double? {
+        guard let days = recencyPopup?.selectedItem?.representedObject as? Int, days != 0 else { return nil }
+        if days < 0 { return Calendar.current.startOfDay(for: Date()).timeIntervalSince1970 }
+        return Date().timeIntervalSince1970 - Double(days) * 86400
+    }
+
     func rebuildBoardPopup() {
         guard boardPopup != nil else { return }
         let current = boardFilter
@@ -664,6 +1148,25 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         }
     }
 
+    func rebuildAppPopup() {
+        guard appPopup != nil else { return }
+        let current = appFilter
+        appPopup.removeAllItems()
+        let allItem = NSMenuItem(title: "All apps", action: nil, keyEquivalent: "")
+        allItem.representedObject = nil as String?
+        appPopup.menu?.addItem(allItem)
+        let apps = Set(store.items.compactMap { $0.sourceApp }).sorted()
+        for name in apps {
+            let mi = NSMenuItem(title: name, action: nil, keyEquivalent: "")
+            mi.representedObject = name
+            appPopup.menu?.addItem(mi)
+        }
+        if let current,
+           let idx = appPopup.itemArray.firstIndex(where: { ($0.representedObject as? String) == current }) {
+            appPopup.selectItem(at: idx)
+        }
+    }
+
     // The clips currently visible, in display order (pinned first in
     // the unfiltered view). Quick-paste numbers follow this order.
     func visibleItems() -> [ClipItem] {
@@ -677,6 +1180,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                     if !item.pinned { return false }
                 } else if item.board != board { return false }
             }
+            if let app = appFilter, item.sourceApp != app { return false }
+            if let cutoff = recencyCutoff, item.createdAt < cutoff { return false }
             if !q.isEmpty {
                 let haystacks = [item.text, item.ocrText, item.sourceApp, item.filePath]
                 if !haystacks.contains(where: { ($0 ?? "").lowercased().contains(q) }) { return false }
@@ -694,6 +1199,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     func refreshList() {
         guard listStack != nil else { return }
         rebuildBoardPopup()
+        rebuildAppPopup()
         // Drop stack entries whose clips are gone.
         stackIDs = stackIDs.filter { id in store.items.contains { $0.id == id } }
         stackBar.isHidden = stackIDs.isEmpty
@@ -702,6 +1208,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         }
 
         for view in listStack.arrangedSubviews { listStack.removeArrangedSubview(view); view.removeFromSuperview() }
+
+        if let upd = availableUpdate, UserDefaults.standard.string(forKey: "dismissedUpdateVersion") != upd.version {
+            let banner = updateBanner(version: upd.version)
+            listStack.addArrangedSubview(banner)
+            banner.widthAnchor.constraint(equalTo: listStack.widthAnchor).isActive = true
+        }
 
         let items = visibleItems()
         emptyLabel.isHidden = !items.isEmpty
@@ -926,6 +1438,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                 pinMark.centerYAnchor.constraint(equalTo: typeText.centerYAnchor)
             ])
         }
+        var appBadgeLeading: NSLayoutXAxisAnchor? = nil
         if let icon = sourceAppIcon(for: item) {
             let badgeBox = NSView()
             badgeBox.wantsLayer = true
@@ -940,6 +1453,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             iv.translatesAutoresizingMaskIntoConstraints = false
             badgeBox.addSubview(iv)
             header.addSubview(badgeBox)
+            appBadgeLeading = badgeBox.leadingAnchor
             NSLayoutConstraint.activate([
                 badgeBox.widthAnchor.constraint(equalToConstant: 32),
                 badgeBox.heightAnchor.constraint(equalToConstant: 32),
@@ -1032,13 +1546,45 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                 fullWidth(swatch)
             }
         default:
-            let label = NSTextField(wrappingLabelWithString: item.preview)
-            label.font = NSFont.systemFont(ofSize: 13)
-            label.textColor = .labelColor
-            label.maximumNumberOfLines = 5
-            label.lineBreakMode = .byTruncatingTail
-            body.addArrangedSubview(label)
-            fullWidth(label)
+            if isLinkItem(item) {
+                enrichLinkIfNeeded(item)
+                if let name = item.linkImageFile {
+                    let iv = NSImageView()
+                    iv.image = NSImage(contentsOf: store.imagesDir.appendingPathComponent(name))
+                    iv.imageScaling = .scaleProportionallyUpOrDown
+                    iv.wantsLayer = true
+                    iv.layer?.cornerRadius = 8
+                    iv.layer?.masksToBounds = true
+                    iv.layer?.backgroundColor = NSColor(white: 0.95, alpha: 1).cgColor
+                    iv.translatesAutoresizingMaskIntoConstraints = false
+                    iv.heightAnchor.constraint(equalToConstant: 110).isActive = true
+                    body.addArrangedSubview(iv)
+                    fullWidth(iv)
+                }
+                if let title = item.linkTitle, !title.isEmpty {
+                    let t = NSTextField(wrappingLabelWithString: title)
+                    t.font = NSFont.systemFont(ofSize: 12.5, weight: .semibold)
+                    t.textColor = .labelColor
+                    t.maximumNumberOfLines = 2
+                    t.lineBreakMode = .byTruncatingTail
+                    body.addArrangedSubview(t)
+                    fullWidth(t)
+                }
+                let u = NSTextField(labelWithString: item.preview)
+                u.font = NSFont.systemFont(ofSize: 11.5)
+                u.textColor = .secondaryLabelColor
+                u.lineBreakMode = .byTruncatingMiddle
+                body.addArrangedSubview(u)
+                fullWidth(u)
+            } else {
+                let label = NSTextField(wrappingLabelWithString: item.preview)
+                label.font = NSFont.systemFont(ofSize: 13)
+                label.textColor = .labelColor
+                label.maximumNumberOfLines = 5
+                label.lineBreakMode = .byTruncatingTail
+                body.addArrangedSubview(label)
+                fullWidth(label)
+            }
         }
 
         // Footer: actions left and right, Paste-style metadata centred.
@@ -1099,6 +1645,25 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         click.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(click)
 
+        // Preview / edit button in the header — added after the click
+        // overlay so the overlay does not swallow its clicks.
+        let previewBtn = NSButton()
+        previewBtn.image = NSImage(systemSymbolName: "eye", accessibilityDescription: "Preview")
+        previewBtn.bezelStyle = .inline
+        previewBtn.isBordered = false
+        previewBtn.contentTintColor = onBand
+        previewBtn.toolTip = "Preview / Edit"
+        previewBtn.target = self
+        previewBtn.action = #selector(previewClicked(_:))
+        previewBtn.identifier = NSUserInterfaceItemIdentifier(item.id)
+        previewBtn.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(previewBtn)
+
+        let menu = cardMenu(for: item)
+        card.menu = menu
+        click.menu = menu
+        footer.menu = menu
+
         NSLayoutConstraint.activate([
             body.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 10),
             body.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 12),
@@ -1114,6 +1679,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             click.leadingAnchor.constraint(equalTo: card.leadingAnchor),
             click.trailingAnchor.constraint(equalTo: card.trailingAnchor),
             click.bottomAnchor.constraint(equalTo: footer.topAnchor),
+
+            previewBtn.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            previewBtn.trailingAnchor.constraint(equalTo: appBadgeLeading ?? header.trailingAnchor, constant: appBadgeLeading == nil ? -12 : -6),
+            previewBtn.widthAnchor.constraint(equalToConstant: 20),
+            previewBtn.heightAnchor.constraint(equalToConstant: 20),
 
             pin.leadingAnchor.constraint(equalTo: footer.leadingAnchor, constant: 10),
             pin.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
@@ -1150,15 +1720,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     }
 
     @objc func pinClicked(_ sender: NSButton) {
-        guard let found = item(for: sender),
-              let idx = store.items.firstIndex(where: { $0.id == found.id }) else { return }
-        store.items[idx].pinned.toggle()
-        store.items.sort { a, b in
-            if a.pinned != b.pinned { return a.pinned && !b.pinned }
-            return a.createdAt > b.createdAt
-        }
-        store.save()
-        refreshList()
+        guard let found = item(for: sender) else { return }
+        togglePin(id: found.id)
     }
 
     @objc func boardChosen(_ sender: NSMenuItem) {
