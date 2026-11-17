@@ -712,7 +712,7 @@ func hslString(from color: NSColor) -> String {
 
 // MARK: - App
 
-final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegate, NSWindowDelegate {
+final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegate, NSWindowDelegate, URLSessionDownloadDelegate {
     static let shared = AppController()
 
     let store = ClipStore()
@@ -1164,7 +1164,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         return result
     }
 
-    // MARK: Update checker
+    // MARK: Update checker + one-click install (v2.6.0)
 
     // The keepsake repo is private, so the app cannot read its
     // releases anonymously. A tiny public gist carries the latest
@@ -1172,7 +1172,28 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     static let updateFeedURL = "https://gist.githubusercontent.com/femisowems/114759138a0c643983d577960363096a/raw/clipkeep-version.json"
     var availableUpdate: (version: String, url: String)?
 
-    func checkForUpdate() {
+    // The update strip (built in buildPanel): pinned under the
+    // search row — the notice's home since the v2.6.0 overhaul
+    // (placement approved Nov 17; pieces 1 + 4 picked: one-click
+    // install with progress, and Later = snooze to tomorrow).
+    var updateStrip: NSView!
+    var updateStripLabel: NSTextField!
+    var updateInstallButton: NSButton!
+    var updateLaterButton: NSButton!
+    var updateDismissButton: NSButton!
+    var updateProgress: NSProgressIndicator!
+    var updateProgressLabel: NSTextField!
+    var updateStripHeight: NSLayoutConstraint!
+    var tabsTopConstraint: NSLayoutConstraint!
+    private var downloadTask: URLSessionDownloadTask?
+    private var downloadSession: URLSession?
+    private var pendingInstallVersion: String?
+    private var updateSnoozedUntil: Date {
+        get { Date(timeIntervalSince1970: UserDefaults.standard.double(forKey: "updateSnoozedUntil")) }
+        set { UserDefaults.standard.set(newValue.timeIntervalSince1970, forKey: "updateSnoozedUntil") }
+    }
+
+    func checkForUpdate(manual: Bool = false) {
         guard let feed = URL(string: AppController.updateFeedURL) else { return }
         var request = URLRequest(url: feed)
         request.timeoutInterval = 6
@@ -1180,64 +1201,179 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
             guard let self, let data,
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let latest = obj["latest"] as? String,
+                  // "latest" is the canonical key; "version" is
+                  // accepted too — a feed published with only the
+                  // wrong key once broke checks silently (Nov 17).
+                  let latest = (obj["latest"] as? String) ?? (obj["version"] as? String),
                   let url = obj["url"] as? String else { return }
             let current = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
-            guard latest.compare(current, options: .numeric) == .orderedDescending else { return }
             DispatchQueue.main.async {
-                self.availableUpdate = (latest, url)
-                self.refreshList()
+                if latest.compare(current, options: .numeric) == .orderedDescending {
+                    self.availableUpdate = (latest, url)
+                } else {
+                    self.availableUpdate = nil
+                    if manual { self.flashUpToDateStrip() }
+                }
+                self.refreshUpdateStrip()
             }
         }.resume()
     }
 
-    func updateBanner(version: String) -> NSView {
-        let banner = NSView()
-        banner.wantsLayer = true
-        banner.layer?.backgroundColor = currentTheme.accent.withAlphaComponent(0.16).cgColor
-        banner.layer?.cornerRadius = 10
-        banner.translatesAutoresizingMaskIntoConstraints = false
-        let label = NSTextField(labelWithString: "ClipKeep \(version) is available")
-        label.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
-        label.textColor = currentTheme.accent
-        label.translatesAutoresizingMaskIntoConstraints = false
-        banner.addSubview(label)
-        let download = NSButton(title: "Download", target: self, action: #selector(updateDownloadClicked))
-        download.bezelStyle = .rounded
-        download.controlSize = .small
-        download.translatesAutoresizingMaskIntoConstraints = false
-        banner.addSubview(download)
-        let dismiss = NSButton(title: "Dismiss", target: self, action: #selector(updateDismissClicked))
-        dismiss.bezelStyle = .inline
-        dismiss.isBordered = false
-        dismiss.font = NSFont.systemFont(ofSize: 11, weight: .medium)
-        dismiss.contentTintColor = .secondaryLabelColor
-        dismiss.translatesAutoresizingMaskIntoConstraints = false
-        banner.addSubview(dismiss)
-        NSLayoutConstraint.activate([
-            banner.heightAnchor.constraint(equalToConstant: 36),
-            label.leadingAnchor.constraint(equalTo: banner.leadingAnchor, constant: 12),
-            label.centerYAnchor.constraint(equalTo: banner.centerYAnchor),
-            dismiss.trailingAnchor.constraint(equalTo: banner.trailingAnchor, constant: -10),
-            dismiss.centerYAnchor.constraint(equalTo: banner.centerYAnchor),
-            download.trailingAnchor.constraint(equalTo: dismiss.leadingAnchor, constant: -8),
-            download.centerYAnchor.constraint(equalTo: banner.centerYAnchor),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: download.leadingAnchor, constant: -8)
-        ])
-        return banner
+    private enum StripMode { case hidden, available, progress, message }
+    private func setStripMode(_ mode: StripMode) {
+        let show = mode != .hidden
+        updateStrip.isHidden = !show
+        updateStripHeight.constant = show ? 34 : 0
+        tabsTopConstraint.constant = show ? 8 : 0
+        updateInstallButton.isHidden = mode != .available
+        updateLaterButton.isHidden = mode != .available
+        updateDismissButton.isHidden = mode != .available
+        updateProgress.isHidden = mode != .progress
+        updateProgressLabel.isHidden = mode != .progress
     }
 
-    @objc func updateDownloadClicked() {
-        if let upd = availableUpdate, let url = URL(string: upd.url) {
-            NSWorkspace.shared.open(url)
+    func refreshUpdateStrip() {
+        guard updateStrip != nil else { return }
+        updateStrip.layer?.backgroundColor = currentTheme.accent.withAlphaComponent(0.15).cgColor
+        updateStripLabel.textColor = currentTheme.accent
+        if downloadTask != nil { return } // the install flow owns the strip
+        let dismissed = UserDefaults.standard.string(forKey: "dismissedUpdateVersion")
+        if let upd = availableUpdate, dismissed != upd.version, Date() >= updateSnoozedUntil {
+            updateStripLabel.stringValue = "ClipKeep \(upd.version) is available"
+            setStripMode(.available)
+        } else {
+            setStripMode(.hidden)
         }
+    }
+
+    // A manual check that finds nothing still answers: the strip
+    // flashes "up to date" instead of the old silent no-op.
+    func flashUpToDateStrip() {
+        guard updateStrip != nil else { return }
+        updateStrip.layer?.backgroundColor = currentTheme.accent.withAlphaComponent(0.15).cgColor
+        updateStripLabel.textColor = currentTheme.accent
+        updateStripLabel.stringValue = "✓ You're up to date"
+        setStripMode(.message)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { [weak self] in
+            self?.refreshUpdateStrip()
+        }
+    }
+
+    @objc func updateInstallClicked() {
+        guard downloadTask == nil,
+              let upd = availableUpdate, let url = URL(string: upd.url) else { return }
+        pendingInstallVersion = upd.version
+        updateStripLabel.stringValue = "Downloading \(upd.version)…"
+        updateProgress.isIndeterminate = false
+        updateProgress.doubleValue = 0
+        updateProgressLabel.stringValue = ""
+        setStripMode(.progress)
+        let session = URLSession(configuration: .default, delegate: self, delegateQueue: .main)
+        downloadSession = session
+        downloadTask = session.downloadTask(with: url)
+        downloadTask?.resume()
+    }
+
+    @objc func updateLaterClicked() {
+        updateSnoozedUntil = Date().addingTimeInterval(24 * 3600)
+        refreshUpdateStrip()
     }
 
     @objc func updateDismissClicked() {
         if let upd = availableUpdate {
             UserDefaults.standard.set(upd.version, forKey: "dismissedUpdateVersion")
         }
-        refreshList()
+        refreshUpdateStrip()
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        guard totalBytesExpectedToWrite > 0 else { return }
+        let pct = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
+        updateProgress.doubleValue = pct * 100
+        updateProgressLabel.stringValue = "\(Int(pct * 100))%"
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        let version = pendingInstallVersion ?? "update"
+        updateStripLabel.stringValue = "Installing \(version)…"
+        updateProgress.isIndeterminate = true
+        updateProgressLabel.stringValue = ""
+        do {
+            try installDownloadedUpdate(zipAt: location, version: version)
+        } catch {
+            installFailed(error.localizedDescription)
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error { installFailed(error.localizedDescription) }
+        downloadTask = nil
+        downloadSession = nil
+    }
+
+    private func installFailed(_ message: String) {
+        downloadTask = nil
+        updateProgress.isIndeterminate = false
+        updateStripLabel.stringValue = "Update failed: \(message)"
+        setStripMode(.message)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+            guard let self, self.downloadTask == nil else { return }
+            if let upd = self.availableUpdate {
+                self.updateStripLabel.stringValue = "ClipKeep \(upd.version) is available"
+                self.setStripMode(.available)
+            } else {
+                self.refreshUpdateStrip()
+            }
+        }
+    }
+
+    // Replace the running app with the downloaded one: unzip to
+    // a staging folder, then a detached script waits for this
+    // process to exit, swaps the bundles (keeping a backup until
+    // the new one is in place), and relaunches.
+    private func installDownloadedUpdate(zipAt zipURL: URL, version: String) throws {
+        let fm = FileManager.default
+        let stage = fm.temporaryDirectory.appendingPathComponent("clipkeep-update-\(version)")
+        try? fm.removeItem(at: stage)
+        try fm.createDirectory(at: stage, withIntermediateDirectories: true)
+        // The download task's temp file vanishes when this
+        // delegate returns, so move it into staging first.
+        let stagedZip = stage.appendingPathComponent("update.zip")
+        try fm.copyItem(at: zipURL, to: stagedZip)
+        let unzip = Process()
+        unzip.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+        unzip.arguments = ["-x", "-k", stagedZip.path, stage.path]
+        try unzip.run()
+        unzip.waitUntilExit()
+        guard unzip.terminationStatus == 0 else {
+            throw NSError(domain: "ClipKeepUpdate", code: 1, userInfo: [NSLocalizedDescriptionKey: "couldn't unzip the download"])
+        }
+        let newApp = stage.appendingPathComponent("ClipKeep.app")
+        guard fm.fileExists(atPath: newApp.path) else {
+            throw NSError(domain: "ClipKeepUpdate", code: 2, userInfo: [NSLocalizedDescriptionKey: "the download didn't contain the app"])
+        }
+        let current = Bundle.main.bundlePath
+        let backup = current + ".bak"
+        let script = """
+        #!/bin/bash
+        while kill -0 \(ProcessInfo.processInfo.processIdentifier) 2>/dev/null; do sleep 0.3; done
+        rm -rf "\(backup)"
+        mv "\(current)" "\(backup)"
+        if mv "\(newApp.path)" "\(current)"; then
+          rm -rf "\(backup)"
+          open "\(current)"
+        else
+          mv "\(backup)" "\(current)"
+          open "\(newApp.path)"
+        fi
+        """
+        let scriptURL = stage.appendingPathComponent("swap.sh")
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        let run = Process()
+        run.executableURL = URL(fileURLWithPath: "/bin/bash")
+        run.arguments = [scriptURL.path]
+        try run.run()
+        NSApp.terminate(nil)
     }
 
     // MARK: Preview / edit
@@ -1771,8 +1907,55 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         overflowButton.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(overflowButton)
 
-        // The old "✓ Copied" pill lived here until v2.5.2, when
-        // the confirmation moved onto the card + menu bar (C + D).
+        // Update strip (v2.6.0): pinned under the search row.
+        // Hidden (height 0) unless an update is available, an
+        // install is running, or a transient message shows.
+        updateStrip = NSView()
+        updateStrip.wantsLayer = true
+        updateStrip.layer?.cornerRadius = 9
+        updateStrip.translatesAutoresizingMaskIntoConstraints = false
+        updateStrip.isHidden = true
+        content.addSubview(updateStrip)
+
+        updateStripLabel = NSTextField(labelWithString: "")
+        updateStripLabel.font = NSFont.systemFont(ofSize: 12.5, weight: .semibold)
+        updateStripLabel.translatesAutoresizingMaskIntoConstraints = false
+        updateStrip.addSubview(updateStripLabel)
+
+        updateInstallButton = NSButton(title: "Install", target: self, action: #selector(updateInstallClicked))
+        updateInstallButton.bezelStyle = .rounded
+        updateInstallButton.controlSize = .small
+        updateInstallButton.translatesAutoresizingMaskIntoConstraints = false
+        updateStrip.addSubview(updateInstallButton)
+
+        updateLaterButton = NSButton(title: "Later", target: self, action: #selector(updateLaterClicked))
+        updateLaterButton.bezelStyle = .inline
+        updateLaterButton.isBordered = false
+        updateLaterButton.font = NSFont.systemFont(ofSize: 11.5, weight: .medium)
+        updateLaterButton.translatesAutoresizingMaskIntoConstraints = false
+        updateStrip.addSubview(updateLaterButton)
+
+        updateDismissButton = NSButton(title: "✕", target: self, action: #selector(updateDismissClicked))
+        updateDismissButton.bezelStyle = .inline
+        updateDismissButton.isBordered = false
+        updateDismissButton.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        updateDismissButton.translatesAutoresizingMaskIntoConstraints = false
+        updateStrip.addSubview(updateDismissButton)
+
+        updateProgress = NSProgressIndicator()
+        updateProgress.style = .bar
+        updateProgress.isIndeterminate = false
+        updateProgress.minValue = 0
+        updateProgress.maxValue = 100
+        updateProgress.translatesAutoresizingMaskIntoConstraints = false
+        updateProgress.isHidden = true
+        updateStrip.addSubview(updateProgress)
+
+        updateProgressLabel = NSTextField(labelWithString: "")
+        updateProgressLabel.font = NSFont.systemFont(ofSize: 11.5, weight: .medium)
+        updateProgressLabel.translatesAutoresizingMaskIntoConstraints = false
+        updateProgressLabel.isHidden = true
+        updateStrip.addSubview(updateProgressLabel)
 
         NSLayoutConstraint.activate([
             // The safe area starts below the title bar; anchoring to
@@ -1793,7 +1976,23 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             // in the panel's left third with empty space to the
             // right). The leading floor keeps a narrow panel from
             // pushing them off the left edge.
-            pillTabs.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 8),
+            updateStrip.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 8),
+            updateStrip.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
+            updateStrip.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -10),
+            updateStripLabel.leadingAnchor.constraint(equalTo: updateStrip.leadingAnchor, constant: 12),
+            updateStripLabel.centerYAnchor.constraint(equalTo: updateStrip.centerYAnchor),
+            updateStripLabel.trailingAnchor.constraint(lessThanOrEqualTo: updateInstallButton.leadingAnchor, constant: -8),
+            updateInstallButton.trailingAnchor.constraint(equalTo: updateLaterButton.leadingAnchor, constant: -6),
+            updateInstallButton.centerYAnchor.constraint(equalTo: updateStrip.centerYAnchor),
+            updateLaterButton.trailingAnchor.constraint(equalTo: updateDismissButton.leadingAnchor, constant: -4),
+            updateLaterButton.centerYAnchor.constraint(equalTo: updateStrip.centerYAnchor),
+            updateDismissButton.trailingAnchor.constraint(equalTo: updateStrip.trailingAnchor, constant: -8),
+            updateDismissButton.centerYAnchor.constraint(equalTo: updateStrip.centerYAnchor),
+            updateProgress.leadingAnchor.constraint(equalTo: updateStripLabel.trailingAnchor, constant: 10),
+            updateProgress.centerYAnchor.constraint(equalTo: updateStrip.centerYAnchor),
+            updateProgress.widthAnchor.constraint(equalToConstant: 130),
+            updateProgressLabel.leadingAnchor.constraint(equalTo: updateProgress.trailingAnchor, constant: 8),
+            updateProgressLabel.centerYAnchor.constraint(equalTo: updateStrip.centerYAnchor),
             pillTabs.centerXAnchor.constraint(equalTo: content.centerXAnchor),
             pillTabs.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor, constant: 10),
             pillTabs.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -10),
@@ -1822,6 +2021,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             emptyLabel.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
             emptyLabel.widthAnchor.constraint(lessThanOrEqualTo: scrollView.widthAnchor, constant: -48)
         ])
+
+        // Stored so the strip can open/close by changing two
+        // constants: strip height 0/34, tab-row gap 0/8.
+        updateStripHeight = updateStrip.heightAnchor.constraint(equalToConstant: 0)
+        updateStripHeight.isActive = true
+        tabsTopConstraint = pillTabs.topAnchor.constraint(equalTo: updateStrip.bottomAnchor, constant: 0)
+        tabsTopConstraint.isActive = true
 
         // Apply the saved theme (Warm Tint on first run); this
         // also does the first refreshList with themed cards.
@@ -1972,6 +2178,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         overflowButton?.hoverBG = theme.fieldHoverBG
         overflowButton?.pressedBG = theme.pressedWash
         overflowButton?.chromeBorderColor = theme.fieldBorder
+        refreshUpdateStrip()
         refreshList()
     }
 
@@ -2149,13 +2356,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
         for view in listStack.arrangedSubviews { listStack.removeArrangedSubview(view); view.removeFromSuperview() }
 
-        if let upd = availableUpdate, UserDefaults.standard.string(forKey: "dismissedUpdateVersion") != upd.version {
-            let banner = updateBanner(version: upd.version)
-            listStack.addArrangedSubview(banner)
-            banner.widthAnchor.constraint(equalToConstant: 300).isActive = true
-            // No height pin to the stack: the banner has its own
-            // 36pt height and top-aligns like the cards.
-        }
+        // The update notice no longer lives in the feed — it is
+        // the strip under the search row (v2.6.0).
 
         let items = visibleItems()
         emptyLabel.isHidden = !items.isEmpty
@@ -3036,7 +3238,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     }
 
     @objc func checkForUpdateClicked() {
-        checkForUpdate()
+        checkForUpdate(manual: true)
     }
 
     @objc func togglePanel() {
