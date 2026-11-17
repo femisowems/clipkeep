@@ -15,9 +15,9 @@ copy never leaves your Mac.
 *(Repository codename: **keepsake** — it keeps what you copy, for
 safekeeping. The app itself is called ClipKeep.)*
 
-> 🚧 **Work in progress** — ClipKeep is under active development.
-> Features, behaviour and this README may change between versions,
-> and things may break. It isn't ready for general use yet.
+> 🚧 **Work in progress** — ClipKeep is under active development
+> (current release: **v2.6.0**). Features, behaviour and this README
+> may change between versions, and things may break.
 
 ---
 
@@ -25,15 +25,33 @@ safekeeping. The app itself is called ClipKeep.)*
 
 - **Menu bar app, no Dock icon** — a 📋 in your menu bar (⏸ while
   capture is paused), and a floating panel toggled by clicking it or
-  pressing **⌘⇧V** from any app.
+  pressing **⌘⇧V** from any app. The panel steps aside on its own
+  when you switch to another app.
 - **Captures almost everything** — plain text, images, files copied in
   Finder, and colours, recorded in the background as you copy. Each
-  clip shows **which app it came from**.
+  clip shows **which app it came from**. Copy a colour *literal* —
+  `#RRGGBB`, `rgb()`, `hsl()` — and it files as a colour clip, not
+  text.
+- **A horizontal feed of cards** — 300pt cards in a bottom-anchored,
+  full-width strip, pinned clips first, the current clip outlined.
+  Every card has a coloured header band per type (text cards take
+  their colour from the app you copied from, links are teal, files
+  blue, images purple, colour clips wear the colour itself), the
+  source app's icon in a badge, relative times ("4 hours ago"), and
+  Paste-style footers — character counts, image dimensions, file
+  sizes.
+- **Filter tabs with live counts** — All / Text / Links / Images /
+  Files / Colours as pill tabs with SF Symbol icons and count badges.
+  The last-used tab is remembered, Colours can sort by hue, and each
+  tab has its own empty state.
 - **Search that sees inside images** — image clips are run through
   on-device text recognition (Apple's Vision framework) when they're
-  captured, so you can find a screenshot by the words in it. Search
-  also covers text, file names and source apps, and type filters
-  (Text / Images / Files / Colours) sit next to the search field.
+  captured, so you can find a screenshot by the words in it. Image
+  cards show a "Contains text" chip and a one-line teaser; the full
+  text is in Preview, with Copy Text / Paste as Text. Search also
+  covers text, file names and source apps, and filters by source app
+  and recency (Today / 7 / 30 days) sit next to the search field.
+  **⌘F** jumps to search; **Esc** clears it, then closes the panel.
 - **Pinboards** — file keepers onto named boards (snippets, templates,
   colours). Pinned and boarded clips never expire; a board picker
   filters the list to one board at a time.
@@ -42,9 +60,18 @@ safekeeping. The app itself is called ClipKeep.)*
     granted Accessibility permission, ClipKeep presses ⌘V for you so
     it lands where your cursor is.
   - **⌘1–⌘9** quick-pastes the first nine visible clips while the
-    panel is open (the rows show their numbers).
+    panel is open (the cards show their numbers).
   - **Paste Stack** — queue clips with **+ Stack**, then paste them
     in order with **⌃⌥⌘V**, built for forms and repetitive entry.
+- **Confirmation you can see** — copying or pasting flashes a
+  "✓ Copied" chip and an accent outline on the card itself, and the
+  📋 menu-bar item flashes green "✓ Copied" / "✓ Pasted", so actions
+  with no card on screen (Preview copies, the Paste Stack) confirm
+  too.
+- **Four panel themes** — Warm Tint (light, frosted), Midnight,
+  Ember and Lagoon (dark), switchable from the ••• menu's Theme
+  submenu and remembered between launches. A **Reduce Transparency**
+  toggle makes the theme tint fully opaque.
 - **Private by design**
   - Copies marked *concealed* or *transient* (how password managers
     mark theirs) are **never recorded**.
@@ -58,24 +85,20 @@ safekeeping. The app itself is called ClipKeep.)*
   500, 1000, or no limit. Identical copies are de-duplicated (copying
   the same thing again just brings it back to the top).
 - **Pause capture** any time from the panel.
-- **A card for every clip** (v2.1) — the panel is styled after Paste:
-  white rounded cards on a light backdrop, a coloured header band per
-  clip (text cards take their colour from the app you copied from,
-  links are green, files blue, images purple, colour clips wear the
-  colour itself), the source app's icon in a badge, relative times
-  ("4 hours ago"), and Paste-style footers — character counts, image
-  dimensions, file sizes.
-- **Link previews** (v2.2) — copied links fetch the page title and
-  preview image in the background and render as rich cards.
+- **Link previews** — copied links fetch the page title and preview
+  image in the background and render as rich cards.
 - **Preview & edit** — the eye button on a card (or right-click →
   Preview / Edit) opens any clip full-size; text clips can be edited
   and saved in place.
 - **Right-click menu** on every card: Paste, Copy, Preview / Edit,
-  Pin, Move to Board, Add to Paste Stack, Delete.
-- **Update checker** — at launch the app checks a tiny public version
-  feed and banners new releases at the top of the panel.
-- **Search filters** — by source app and recency (Today / 7 / 30
-  days), next to the pinboard filter.
+  Pin, Move to Board, Add to Paste Stack, Delete — colour cards add
+  Copy as RGB / Copy as HSL.
+- **One-click updates** (v2.6.0) — when a new version is out, a slim
+  strip appears under the search row (never in your feed). **Install**
+  downloads it in the background with a progress bar, swaps the app
+  and relaunches it; **Later** snoozes the notice to tomorrow; **✕**
+  dismisses that version. Checking manually when you're current
+  flashes "✓ You're up to date".
 
 ## Requirements
 
@@ -86,9 +109,21 @@ safekeeping. The app itself is called ClipKeep.)*
 
 ## Installing
 
-**Coming soon.** ClipKeep is a work in progress and isn't ready for
-general installation yet. Full install instructions will land here
-when it is.
+1. Download the latest `ClipKeep-app-vX.Y.Z.zip` from the
+   [releases page](https://github.com/femisowems/keepsake/releases)
+   and unzip it.
+2. Drag **ClipKeep.app** into your Applications folder and open it.
+   The app is ad-hoc signed (not notarized), so on first launch
+   macOS will block it — right-click the app and choose **Open**,
+   then **Open** again in the dialog. You only do this once.
+3. Optional but recommended: grant **Accessibility** permission
+   (System Settings → Privacy & Security → Accessibility) so
+   click-to-paste can press ⌘V for you. Without it, clicking a clip
+   still copies it back to the clipboard.
+
+**Updating:** from v2.6.0 on, updates install themselves from the
+strip described above. On an older version, use the update banner's
+Download button and replace the app manually one last time.
 
 ## How to use it
 
@@ -97,7 +132,9 @@ when it is.
 | **⌘⇧V** or click 📋 | Show / hide the panel |
 | **Click a clip** | Put it back on the clipboard (and paste it, with Accessibility permission) |
 | **⌘1–⌘9** (panel open) | Quick-paste that numbered clip |
-| **Pin / Unpin** | Keep a clip forever, shown in the Pinned group |
+| **⌘F** (panel open) | Focus the search field |
+| **Esc** (panel open) | Clear the search, then close the panel |
+| **Pin / Unpin** | Keep a clip forever, shown first in the feed |
 | **Board…** | File a clip on a pinboard (or create a new one) |
 | **+ Stack** | Add a clip to the Paste Stack |
 | **⌃⌥⌘V** | Paste the next clip from the stack, in order |
@@ -105,11 +142,14 @@ when it is.
 | **Clear history** | Delete everything except pinned and boarded clips |
 | **Pause capture** | Stop recording new copies until you resume |
 | **Excluded apps…** | Manage the list of apps whose copies are never recorded |
+| **Reset Panel Size** (••• menu) | Restore the default full-width strip |
 | **Limit popup** | History size: 200 / 500 / 1000 / no limit |
 
 ### Good to know
 
-- The panel remembers its size and position between launches.
+- The panel remembers its size and position between launches, and
+  validates the saved frame before restoring it — a bad size can't
+  stick.
 - Text is stored as **plain text** — formatting is stripped at
   capture, deliberately. What you paste back is clean text.
 - Deleting an image clip deletes its stored PNG too; there are no
@@ -119,18 +159,22 @@ when it is.
 
 ## What it deliberately does not do
 
-- **No iCloud sync, no iPhone/iPad app.** Sync needs CloudKit
-  entitlements and a full Xcode project; ClipKeep stays a single
-  file you can read end to end. (This is the commercial apps' real
-  advantage — noted honestly.)
+- **No iCloud sync yet.** Sync is on the roadmap; ClipKeep stays a
+  single file you can read end to end. (This is the commercial apps'
+  real advantage — noted honestly.)
+- **No phone app yet.** A mobile version is on the roadmap for after
+  the Mac app is done. Research notes (`MOBILE-RESEARCH.md`) found
+  that iOS and Android both forbid passive clipboard capture, so the
+  mobile app will be a deliberate-capture companion, not a mirror of
+  the Mac app.
 - **No AI features.** The one exception is on-device text
   recognition for search, which runs entirely on your Mac.
 - **No rich-text storage** — see above; plain text on purpose.
 
 ## How it works
 
-ClipKeep is a single-file AppKit app (`main.swift`, ~1,900 lines). It
-polls the system pasteboard's change count twice a second; on a
+ClipKeep is a single-file AppKit app (`main.swift`, ~3,300 lines).
+It polls the system pasteboard's change count twice a second; on a
 change it skips concealed/transient copies and excluded apps, then
 records the first matching type — file, image, colour, or text —
 along with the frontmost app's name. Images are written as PNGs to
@@ -138,18 +182,24 @@ along with the frontmost app's name. Images are written as PNGs to
 `history.json` next to them; the Vision framework reads their text
 for search. Paste-back writes the clip to the pasteboard and, with
 Accessibility permission, synthesizes ⌘V. Global hotkeys use the
-Carbon hot-key API, so no entitlement or helper is needed.
+Carbon hot-key API, so no entitlement or helper is needed. Updates
+are checked against a tiny public version feed (the repo is private,
+so releases can't be read anonymously); the one-click installer
+downloads the release zip, swaps the app bundle via a detached
+script, and relaunches.
 
 ## Project layout
 
 ```
 keepsake/
-├── main.swift         # the whole app — capture, panel, paste-back
-├── build.sh           # compiles ClipKeep.app with swiftc (no Xcode project)
-├── SPEC.md            # the v2 spec this build implements
-├── AppIcon.icns       # bundled app icon (all macOS sizes)
-├── AppIcon-1024.png   # icon source artwork
-├── LICENSE            # MIT
+├── main.swift           # the whole app — capture, panel, paste-back, updates
+├── build.sh             # compiles ClipKeep.app with swiftc (no Xcode project)
+├── SPEC.md              # the v2 spec this build implements
+├── ROADMAP.md           # improvement list, inspection notes, shipped log
+├── MOBILE-RESEARCH.md   # feasibility research for the future mobile version
+├── AppIcon.icns         # bundled app icon (all macOS sizes)
+├── AppIcon-1024.png     # icon source artwork
+├── LICENSE              # MIT
 └── README.md
 ```
 
