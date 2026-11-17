@@ -1170,7 +1170,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     // releases anonymously. A tiny public gist carries the latest
     // version instead; it is bumped as part of each release.
     static let updateFeedURL = "https://gist.githubusercontent.com/femisowems/114759138a0c643983d577960363096a/raw/clipkeep-version.json"
-    var availableUpdate: (version: String, url: String)?
+    // The feed may also carry "sha256" — the release zip's
+    // SHA-256, published with each release since v2.6.1. When
+    // present, the installer verifies the download against it
+    // before swapping the bundle (inspection risk #3, closed
+    // Nov 17). Absent = older feed, install proceeds unverified.
+    var availableUpdate: (version: String, url: String, sha256: String?)?
 
     // The update strip (built in buildPanel): pinned under the
     // search row — the notice's home since the v2.6.0 overhaul
@@ -1188,6 +1193,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     private var downloadTask: URLSessionDownloadTask?
     private var downloadSession: URLSession?
     private var pendingInstallVersion: String?
+    private var pendingInstallSHA256: String?
     private var updateSnoozedUntil: Date {
         get { Date(timeIntervalSince1970: UserDefaults.standard.double(forKey: "updateSnoozedUntil")) }
         set { UserDefaults.standard.set(newValue.timeIntervalSince1970, forKey: "updateSnoozedUntil") }
@@ -1207,9 +1213,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                   let latest = (obj["latest"] as? String) ?? (obj["version"] as? String),
                   let url = obj["url"] as? String else { return }
             let current = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+            let sha = obj["sha256"] as? String
             DispatchQueue.main.async {
                 if latest.compare(current, options: .numeric) == .orderedDescending {
-                    self.availableUpdate = (latest, url)
+                    self.availableUpdate = (latest, url, sha)
                 } else {
                     self.availableUpdate = nil
                     if manual { self.flashUpToDateStrip() }
@@ -1263,6 +1270,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         guard downloadTask == nil,
               let upd = availableUpdate, let url = URL(string: upd.url) else { return }
         pendingInstallVersion = upd.version
+        pendingInstallSHA256 = upd.sha256
         updateStripLabel.stringValue = "Downloading \(upd.version)…"
         updateProgress.isIndeterminate = false
         updateProgress.doubleValue = 0
@@ -1299,7 +1307,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         updateProgress.isIndeterminate = true
         updateProgressLabel.stringValue = ""
         do {
-            try installDownloadedUpdate(zipAt: location, version: version)
+            try installDownloadedUpdate(zipAt: location, version: version, expectedSHA256: pendingInstallSHA256)
         } catch {
             installFailed(error.localizedDescription)
         }
@@ -1327,11 +1335,32 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         }
     }
 
+    // SHA-256 of a file via the system shasum tool — the app
+    // already shells out to ditto for the unzip, so this adds no
+    // new linked dependency. Lowercase hex, or nil on failure.
+    private func sha256(ofFile url: URL) -> String? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/shasum")
+        p.arguments = ["-a", "256", url.path]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        guard (try? p.run()) != nil else { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        guard p.terminationStatus == 0,
+              let out = String(data: data, encoding: .utf8) else { return nil }
+        return out.split(separator: " ").first.map(String.init)?.lowercased()
+    }
+
     // Replace the running app with the downloaded one: unzip to
     // a staging folder, then a detached script waits for this
     // process to exit, swaps the bundles (keeping a backup until
-    // the new one is in place), and relaunches.
-    private func installDownloadedUpdate(zipAt zipURL: URL, version: String) throws {
+    // the new one is in place), and relaunches. When the feed
+    // published a sha256 for this release, the download is
+    // verified against it first and a mismatch (or a failed
+    // verification) aborts the install before anything is
+    // unzipped or swapped.
+    private func installDownloadedUpdate(zipAt zipURL: URL, version: String, expectedSHA256: String?) throws {
         let fm = FileManager.default
         let stage = fm.temporaryDirectory.appendingPathComponent("clipkeep-update-\(version)")
         try? fm.removeItem(at: stage)
@@ -1340,6 +1369,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         // delegate returns, so move it into staging first.
         let stagedZip = stage.appendingPathComponent("update.zip")
         try fm.copyItem(at: zipURL, to: stagedZip)
+        if let expected = expectedSHA256, !expected.isEmpty {
+            guard let actual = sha256(ofFile: stagedZip), actual == expected.lowercased() else {
+                throw NSError(domain: "ClipKeepUpdate", code: 3, userInfo: [NSLocalizedDescriptionKey: "checksum mismatch — the download was discarded"])
+            }
+        }
         let unzip = Process()
         unzip.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
         unzip.arguments = ["-x", "-k", stagedZip.path, stage.path]
