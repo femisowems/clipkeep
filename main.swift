@@ -366,6 +366,11 @@ final class PillTabButton: HoverButton {
     init(type: String, title: String, symbol: String) {
         typeValue = type
         super.init(frame: .zero)
+        // NSButton's built-in title defaults to "Button" and the
+        // cell draws it behind the custom icon/label subviews —
+        // the ghosted double-print on every pill (Nov 17). The
+        // pill's own label subview is the only text it should show.
+        self.title = ""
         translatesAutoresizingMaskIntoConstraints = false
         chromeCornerRadius = 13
         hoverBG = NSColor(white: 0, alpha: 0.07)
@@ -1805,7 +1810,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         if let saved = UserDefaults.standard.string(forKey: panelFrameKey) {
             let f = NSRectFromString(saved)
             if panelFrameIsUsable(f) {
-                panel.setFrame(f, display: false)
+                panel.setFrame(normalizedPanelFrame(f), display: false)
                 return
             }
         }
@@ -1829,7 +1834,23 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         // Only a frame that would pass restore validation is ever
         // written, so a bad size cannot be saved in the first place.
         guard panelFrameIsUsable(panel.frame) else { return }
-        UserDefaults.standard.set(NSStringFromRect(panel.frame), forKey: panelFrameKey)
+        UserDefaults.standard.set(NSStringFromRect(normalizedPanelFrame(panel.frame)), forKey: panelFrameKey)
+    }
+
+    // The default strip shape (520 tall, bottom-anchored) is a
+    // computed layout, not a user-chosen size: normalize it back
+    // to the full screen width. Without this, Stage Manager's
+    // strip clamps the window to ~87% width when it appears, the
+    // clamped frame gets saved by windowDidResize, and the panel
+    // then restores narrow forever (Femi's Nov 17 screenshot).
+    // A frame the user deliberately resized to a different
+    // height is custom and is left exactly as-is.
+    private func normalizedPanelFrame(_ f: NSRect) -> NSRect {
+        guard abs(f.height - 520) < 1 else { return f }
+        guard let screen = NSScreen.screens.first(where: { $0.frame.intersects(f) }) ?? NSScreen.main
+        else { return f }
+        return NSRect(x: screen.frame.minX, y: screen.visibleFrame.minY,
+                      width: screen.frame.width, height: 520)
     }
 
     func windowDidResize(_ notification: Notification) {
@@ -1900,7 +1921,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             UserDefaults.standard.set(theme.id, forKey: "ClipKeepTheme")
         }
         panel?.appearance = NSAppearance(named: theme.dark ? .darkAqua : .aqua)
-        tintView?.layer?.backgroundColor = theme.tint.cgColor
+        // Reduce Transparency (••• menu) makes the theme tint
+        // fully opaque, so the desktop stops showing through the
+        // frosted panel.
+        let solid = UserDefaults.standard.bool(forKey: "ClipKeepReduceTransparency")
+        tintView?.layer?.backgroundColor = (solid ? theme.tint.withAlphaComponent(1)
+                                                  : theme.tint).cgColor
         pillTabs?.applyTheme(theme)
         for shell in toolbarShells { shell.applyTheme(theme) }
         overflowButton?.normalBG = theme.fieldBG
@@ -1914,6 +1940,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         guard let id = sender.representedObject as? String,
               let theme = panelThemes.first(where: { $0.id == id }) else { return }
         applyTheme(theme)
+    }
+
+    @objc func toggleReduceTransparency() {
+        let key = "ClipKeepReduceTransparency"
+        UserDefaults.standard.set(!UserDefaults.standard.bool(forKey: key), forKey: key)
+        applyTheme(currentTheme, persist: false)
     }
 
     // MARK: Filtering + list rendering
@@ -2176,7 +2208,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
     func bandColor(for item: ClipItem) -> NSColor {
         if item.kind == "color", let hex = item.text, let c = colorFromHex(hex) { return c }
-        if isLinkItem(item) { return NSColor(red: 0.204, green: 0.780, blue: 0.349, alpha: 1) }
+        // Links get their own teal — they used to share Text's
+        // green, so the two card types read as one (Nov 17).
+        if isLinkItem(item) { return NSColor(red: 0.0, green: 0.6, blue: 0.65, alpha: 1) }
         switch item.kind {
         case "file":
             return NSColor(red: 0.0, green: 0.478, blue: 1.0, alpha: 1)
@@ -2782,6 +2816,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         }
         themeItem.submenu = themeMenu
         menu.addItem(themeItem)
+        let rtItem = NSMenuItem(title: "Reduce Transparency", action: #selector(toggleReduceTransparency), keyEquivalent: "")
+        rtItem.target = self
+        rtItem.state = UserDefaults.standard.bool(forKey: "ClipKeepReduceTransparency") ? .on : .off
+        menu.addItem(rtItem)
         add("Excluded Apps…", #selector(showExclusions))
         add("Reset Panel Size", #selector(resetPanelSize))
         add("Clear History", #selector(clearHistory))
