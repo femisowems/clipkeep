@@ -1688,7 +1688,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     // MARK: Panel UI
 
     func buildPanel() {
-        panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 520),
+        panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: defaultPanelHeight),
                          styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
                          backing: .buffered, defer: false)
         panel.title = "ClipKeep"
@@ -2044,6 +2044,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     // on the left (Stage Manager's strip) — the panel opened at
     // ~87% of the display width with the whole gap on the left,
     // which read as "only 75% wide". New key retires the V5 frame.
+    // The default strip height. One constant, four jobs: the
+    // panel's initial size, the restore default, the no-screen
+    // fallback, and the shape normalizedPanelFrame recognizes as
+    // "the default strip". They must never drift apart — before
+    // this constant (Nov 17 sizing audit) the literal 520 was
+    // hard-coded in all four places, so changing the height in
+    // fewer than all of them would silently break normalization.
+    private let defaultPanelHeight: CGFloat = 520
+
     private let panelFrameKey = "ClipKeepPanelFrameV6"
 
     private func panelFrameIsUsable(_ f: NSRect) -> Bool {
@@ -2068,9 +2077,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         // like Stage Manager's strip.
         if let screen = NSScreen.main {
             let f = screen.frame, vf = screen.visibleFrame
-            panel.setFrame(NSRect(x: f.minX, y: vf.minY, width: f.width, height: 520), display: false)
+            panel.setFrame(NSRect(x: f.minX, y: vf.minY, width: f.width, height: defaultPanelHeight), display: false)
         } else {
-            panel.setFrame(NSRect(x: 0, y: 0, width: 1100, height: 520), display: false)
+            panel.setFrame(NSRect(x: 0, y: 0, width: 1100, height: defaultPanelHeight), display: false)
             panel.center()
         }
     }
@@ -2091,11 +2100,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     // A frame the user deliberately resized to a different
     // height is custom and is left exactly as-is.
     private func normalizedPanelFrame(_ f: NSRect) -> NSRect {
-        guard abs(f.height - 520) < 1 else { return f }
+        guard abs(f.height - defaultPanelHeight) < 1 else { return f }
         guard let screen = NSScreen.screens.first(where: { $0.frame.intersects(f) }) ?? NSScreen.main
         else { return f }
         return NSRect(x: screen.frame.minX, y: screen.visibleFrame.minY,
-                      width: screen.frame.width, height: 520)
+                      width: screen.frame.width, height: defaultPanelHeight)
     }
 
     func windowDidResize(_ notification: Notification) {
