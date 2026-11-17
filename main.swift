@@ -729,7 +729,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     var overflowButton: HoverButton!
     var toolbarShells: [ToolbarShell] = []
     var currentTheme: PanelTheme = panelThemes[0]
-    var copiedPill: NSTextField!
     var stackBar: NSStackView!
     var stackLabel: NSTextField!
     var listStack: NSStackView!
@@ -932,45 +931,102 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     // writeToPasteboard records it as our own write.
     func copyBack(_ item: ClipItem) {
         writeToPasteboard(item)
-        flashCopied()
+        flashCard(item)
+        flashMenuBar("✓ Copied")
     }
 
     // Copy plain text only (an image clip's OCR text); the panel
     // stays open, like copyBack.
-    func copyText(_ text: String) {
+    func copyText(_ text: String, item: ClipItem? = nil) {
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(text, forType: .string)
         selfWriteChangeCount = pb.changeCount
-        flashCopied()
+        if let item { flashCard(item) }
+        flashMenuBar("✓ Copied")
     }
 
-    // Brief "✓ Copied" confirmation at the bottom of the panel.
-    // A generation counter keeps rapid copies from racing the
-    // fade-out of an earlier flash.
-    private var copiedFlashGeneration = 0
-    func flashCopied() {
-        guard copiedPill != nil, panel.isVisible else { return }
-        copiedFlashGeneration += 1
-        let gen = copiedFlashGeneration
-        copiedPill.alphaValue = 1
-        copiedPill.isHidden = false
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { [weak self] in
-            guard let self, self.copiedFlashGeneration == gen else { return }
-            NSAnimationContext.runAnimationGroup({ ctx in
-                ctx.duration = 0.35
-                self.copiedPill.animator().alphaValue = 0
-            }, completionHandler: { [weak self] in
-                guard let self, self.copiedFlashGeneration == gen else { return }
-                self.copiedPill.isHidden = true
-            })
+    // MARK: Copy/paste confirmation (styles C + D, Femi's pick Nov 17)
+    //
+    // C — the card itself flashes: accent outline + a "✓ Copied"
+    // chip, so the feedback lands where the eyes already are.
+    // D — the menu-bar item flashes "✓ Copied" / "✓ Pasted" in
+    // green: the universal fallback for actions with no card on
+    // screen (Preview copies, Paste Stack). The old bottom pill
+    // was retired in favour of these two.
+
+    func cardView(for item: ClipItem) -> NSView? {
+        listStack?.arrangedSubviews.first { $0.identifier?.rawValue == item.id }
+    }
+
+    // Flashes the item's card if it is on screen; returns whether
+    // it did, so paste can hold the panel for the flash.
+    @discardableResult
+    func flashCard(_ item: ClipItem) -> Bool {
+        guard let card = cardView(for: item), let layer = card.layer else { return false }
+        let oldBorder = layer.borderColor, oldWidth = layer.borderWidth
+        layer.borderColor = currentTheme.accent.cgColor
+        layer.borderWidth = 2.5
+        let chip = NSTextField(labelWithString: "✓ Copied")
+        chip.font = NSFont.systemFont(ofSize: 11, weight: .bold)
+        chip.textColor = .white
+        chip.alignment = .center
+        chip.drawsBackground = true
+        chip.backgroundColor = currentTheme.accent
+        chip.wantsLayer = true
+        chip.layer?.cornerRadius = 9
+        chip.layer?.masksToBounds = true
+        chip.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(chip)
+        NSLayoutConstraint.activate([
+            chip.topAnchor.constraint(equalTo: card.topAnchor, constant: 54),
+            chip.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -8),
+            chip.widthAnchor.constraint(equalToConstant: 76),
+            chip.heightAnchor.constraint(equalToConstant: 18)
+        ])
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.15) {
+            chip.removeFromSuperview()
+            // refreshList rebuilds cards wholesale; only restore
+            // the border if this card is still on screen.
+            if card.superview != nil {
+                layer.borderColor = oldBorder
+                layer.borderWidth = oldWidth
+            }
+        }
+        return true
+    }
+
+    private var menuFlashGeneration = 0
+    func flashMenuBar(_ text: String) {
+        guard let button = statusItem?.button else { return }
+        menuFlashGeneration += 1
+        let gen = menuFlashGeneration
+        button.attributedTitle = NSAttributedString(string: text, attributes: [
+            .foregroundColor: NSColor.systemGreen,
+            .font: NSFont.systemFont(ofSize: 13, weight: .semibold)
+        ])
+        button.title = text
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            guard let self, self.menuFlashGeneration == gen else { return }
+            self.statusItem?.button?.attributedTitle = nil
+            self.statusItem?.button?.title = "📋"
         }
     }
 
-    func pasteBack(_ item: ClipItem) {
+    func pasteBack(_ item: ClipItem, fromStack: Bool = false) {
         writeToPasteboard(item)
-        panel.orderOut(nil)
-        simulatePaste()
+        // Style C's accepted trade-off: when the card is on
+        // screen it flashes for ~0.4s before the panel closes
+        // and the paste lands. The Paste Stack pastes instantly
+        // (its refresh would wipe the flash anyway) and relies
+        // on the menu-bar flash.
+        let flashed = fromStack ? false : flashCard(item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + (flashed ? 0.42 : 0)) { [weak self] in
+            guard let self else { return }
+            self.panel.orderOut(nil)
+            self.simulatePaste()
+            self.flashMenuBar("✓ Pasted")
+        }
     }
 
     // Paste plain text (an image clip's OCR text) the same way:
@@ -982,6 +1038,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         selfWriteChangeCount = pb.changeCount
         panel.orderOut(nil)
         simulatePaste()
+        flashMenuBar("✓ Pasted")
     }
 
     // If Accessibility is granted, press ⌘V in the app underneath
@@ -1006,7 +1063,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         while let firstID = stackIDs.first {
             stackIDs.removeFirst()
             if let item = store.items.first(where: { $0.id == firstID }) {
-                pasteBack(item)
+                pasteBack(item, fromStack: true)
                 refreshList()
                 return
             }
@@ -1376,7 +1433,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
     @objc func previewCopyTextClicked() {
         guard let item = previewItem(), let ocr = item.ocrText else { return }
-        copyText(ocr)
+        copyText(ocr, item: item)
     }
 
     @objc func previewPasteTextClicked() {
@@ -1466,9 +1523,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
     @objc func menuPaste(_ sender: NSMenuItem) { if let i = item(for: sender) { pasteBack(i) } }
     @objc func menuCopy(_ sender: NSMenuItem) { if let i = item(for: sender) { copyBack(i) } }
-    @objc func menuCopyText(_ sender: NSMenuItem) { if let i = item(for: sender), let ocr = i.ocrText { copyText(ocr) } }
-    @objc func menuCopyRGB(_ sender: NSMenuItem) { if let i = item(for: sender), let hex = i.text, let c = colorFromHex(hex) { copyText(rgbString(from: c)) } }
-    @objc func menuCopyHSL(_ sender: NSMenuItem) { if let i = item(for: sender), let hex = i.text, let c = colorFromHex(hex) { copyText(hslString(from: c)) } }
+    @objc func menuCopyText(_ sender: NSMenuItem) { if let i = item(for: sender), let ocr = i.ocrText { copyText(ocr, item: i) } }
+    @objc func menuCopyRGB(_ sender: NSMenuItem) { if let i = item(for: sender), let hex = i.text, let c = colorFromHex(hex) { copyText(rgbString(from: c), item: i) } }
+    @objc func menuCopyHSL(_ sender: NSMenuItem) { if let i = item(for: sender), let hex = i.text, let c = colorFromHex(hex) { copyText(hslString(from: c), item: i) } }
     @objc func menuPasteText(_ sender: NSMenuItem) { if let i = item(for: sender), let ocr = i.ocrText { pasteText(ocr) } }
     @objc func menuPreview(_ sender: NSMenuItem) { if let i = item(for: sender) { openPreview(for: i) } }
     @objc func menuPin(_ sender: NSMenuItem) { if let i = item(for: sender) { togglePin(id: i.id) } }
@@ -1714,21 +1771,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         overflowButton.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(overflowButton)
 
-        // "✓ Copied" pill: flashes at the bottom of the panel when
-        // a copy action lands, so a right-click Copy never feels
-        // like it did nothing. Hidden except during the flash.
-        copiedPill = NSTextField(labelWithString: "✓ Copied")
-        copiedPill.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
-        copiedPill.textColor = .white
-        copiedPill.alignment = .center
-        copiedPill.drawsBackground = true
-        copiedPill.backgroundColor = NSColor.black.withAlphaComponent(0.78)
-        copiedPill.wantsLayer = true
-        copiedPill.layer?.cornerRadius = 10
-        copiedPill.layer?.masksToBounds = true
-        copiedPill.isHidden = true
-        copiedPill.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(copiedPill)
+        // The old "✓ Copied" pill lived here until v2.5.2, when
+        // the confirmation moved onto the card + menu bar (C + D).
 
         NSLayoutConstraint.activate([
             // The safe area starts below the title bar; anchoring to
@@ -1776,12 +1820,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
             emptyLabel.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
             emptyLabel.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
-            emptyLabel.widthAnchor.constraint(lessThanOrEqualTo: scrollView.widthAnchor, constant: -48),
-
-            copiedPill.centerXAnchor.constraint(equalTo: content.centerXAnchor),
-            copiedPill.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -18),
-            copiedPill.widthAnchor.constraint(equalToConstant: 92),
-            copiedPill.heightAnchor.constraint(equalToConstant: 22)
+            emptyLabel.widthAnchor.constraint(lessThanOrEqualTo: scrollView.widthAnchor, constant: -48)
         ])
 
         // Apply the saved theme (Warm Tint on first run); this
@@ -2321,6 +2360,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         let onBand = onBandTextColor(for: band)
 
         let card = NSView()
+        card.identifier = NSUserInterfaceItemIdentifier(item.id)
         card.wantsLayer = true
         card.layer?.backgroundColor = currentTheme.cardBG.cgColor
         card.layer?.cornerRadius = 14
