@@ -229,8 +229,9 @@ func colorFromHex(_ hex: String) -> NSColor? {
 
 // A colour written out as text: the WHOLE string must be the
 // literal, so a sentence mentioning a colour stays text. Accepts
-// #RGB, #RRGGBB, rgb(r, g, b) and rgba(r, g, b, 1) — a translucent
-// rgba stays text, because colour clips store an opaque hex and
+// #RGB, #RRGGBB, #RRGGBBFF, rgb(r, g, b), rgba(r, g, b, 1),
+// hsl(h, s%, l%) and hsla(h, s%, l%, 1) — a translucent colour
+// stays text, because colour clips store an opaque hex and
 // would misrepresent it.
 func colorFromLiteral(_ raw: String) -> NSColor? {
     let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -240,9 +241,48 @@ func colorFromLiteral(_ raw: String) -> NSColor? {
         if digits.count == 3 {
             return colorFromHex("#" + digits.map { "\($0)\($0)" }.joined())
         }
+        if digits.count == 8 {
+            // #RRGGBBAA — only fully opaque (AA = FF) counts.
+            guard digits.suffix(2).uppercased() == "FF" else { return nil }
+            return colorFromHex("#" + String(digits.prefix(6)))
+        }
         return digits.count == 6 ? colorFromHex(s) : nil
     }
     let lower = s.lowercased()
+    let isHSLA = lower.hasPrefix("hsla(")
+    if isHSLA || lower.hasPrefix("hsl(") {
+        guard s.hasSuffix(")") else { return nil }
+        let inner = s.dropFirst(isHSLA ? 5 : 4).dropLast()
+        let parts = inner.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard parts.count == 3 || parts.count == 4,
+              let hDeg = Double(parts[0]) else { return nil }
+        func percent(_ p: String) -> Double? {
+            guard p.hasSuffix("%"), let v = Double(p.dropLast()), (0...100).contains(v) else { return nil }
+            return v / 100
+        }
+        guard let sat = percent(parts[1]), let light = percent(parts[2]) else { return nil }
+        if parts.count == 4 {
+            let a = parts[3]
+            if a.hasSuffix("%") { guard Double(a.dropLast()) == 100 else { return nil } }
+            else { guard Double(a) == 1 else { return nil } }
+        }
+        // HSL → RGB (textbook sector formula, all in Double).
+        let sector = ((hDeg.truncatingRemainder(dividingBy: 360) + 360)
+            .truncatingRemainder(dividingBy: 360)) / 60
+        let c = (1 - abs(2 * light - 1)) * sat
+        let x = c * (1 - abs(sector.truncatingRemainder(dividingBy: 2) - 1))
+        let m = light - c / 2
+        var r = 0.0, g = 0.0, b = 0.0
+        switch sector {
+        case 0..<1: r = c; g = x
+        case 1..<2: r = x; g = c
+        case 2..<3: g = c; b = x
+        case 3..<4: g = x; b = c
+        case 4..<5: r = x; b = c
+        default: r = c; b = x
+        }
+        return NSColor(srgbRed: CGFloat(r + m), green: CGFloat(g + m), blue: CGFloat(b + m), alpha: 1)
+    }
     let isRGBA = lower.hasPrefix("rgba(")
     guard isRGBA || lower.hasPrefix("rgb("), s.hasSuffix(")") else { return nil }
     let inner = s.dropFirst(isRGBA ? 5 : 4).dropLast()
@@ -257,6 +297,28 @@ func colorFromLiteral(_ raw: String) -> NSColor? {
         guard let a = Double(parts[3]), a == 1 else { return nil }
     }
     return NSColor(srgbRed: rgb[0], green: rgb[1], blue: rgb[2], alpha: 1)
+}
+
+func rgbString(from color: NSColor) -> String {
+    guard let c = color.usingColorSpace(.sRGB) else { return "rgb(0, 0, 0)" }
+    return "rgb(\(Int(round(c.redComponent * 255))), \(Int(round(c.greenComponent * 255))), \(Int(round(c.blueComponent * 255))))"
+}
+
+func hslString(from color: NSColor) -> String {
+    guard let c = color.usingColorSpace(.sRGB) else { return "hsl(0, 0%, 0%)" }
+    let r = Double(c.redComponent), g = Double(c.greenComponent), b = Double(c.blueComponent)
+    let maxV = max(r, g, b), minV = min(r, g, b)
+    let l = (maxV + minV) / 2
+    var h = 0.0, s = 0.0
+    if maxV != minV {
+        let d = maxV - minV
+        s = l > 0.5 ? d / (2 - maxV - minV) : d / (maxV + minV)
+        if maxV == r { h = (g - b) / d + (g < b ? 6 : 0) }
+        else if maxV == g { h = (b - r) / d + 2 }
+        else { h = (r - g) / d + 4 }
+        h *= 60
+    }
+    return "hsl(\(Int(round(h))), \(Int(round(s * 100)))%, \(Int(round(l * 100)))%)"
 }
 
 // MARK: - App
@@ -948,6 +1010,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             add("Copy Text", #selector(menuCopyText(_:)))
             add("Paste as Text", #selector(menuPasteText(_:)))
         }
+        if item.kind == "color" {
+            add("Copy as RGB", #selector(menuCopyRGB(_:)))
+            add("Copy as HSL", #selector(menuCopyHSL(_:)))
+        }
         add("Preview / Edit…", #selector(menuPreview(_:)))
         menu.addItem(NSMenuItem.separator())
         add(item.pinned ? "Unpin" : "Pin", #selector(menuPin(_:)))
@@ -981,6 +1047,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     @objc func menuPaste(_ sender: NSMenuItem) { if let i = item(for: sender) { pasteBack(i) } }
     @objc func menuCopy(_ sender: NSMenuItem) { if let i = item(for: sender) { copyBack(i) } }
     @objc func menuCopyText(_ sender: NSMenuItem) { if let i = item(for: sender), let ocr = i.ocrText { copyText(ocr) } }
+    @objc func menuCopyRGB(_ sender: NSMenuItem) { if let i = item(for: sender), let hex = i.text, let c = colorFromHex(hex) { copyText(rgbString(from: c)) } }
+    @objc func menuCopyHSL(_ sender: NSMenuItem) { if let i = item(for: sender), let hex = i.text, let c = colorFromHex(hex) { copyText(hslString(from: c)) } }
     @objc func menuPasteText(_ sender: NSMenuItem) { if let i = item(for: sender), let ocr = i.ocrText { pasteText(ocr) } }
     @objc func menuPreview(_ sender: NSMenuItem) { if let i = item(for: sender) { openPreview(for: i) } }
     @objc func menuPin(_ sender: NSMenuItem) { if let i = item(for: sender) { togglePin(id: i.id) } }
@@ -1061,7 +1129,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
         typeControl = NSSegmentedControl(labels: ["All", "Text", "Links", "Images", "Files", "Colours"],
                                          trackingMode: .selectOne, target: self, action: #selector(filterChanged))
-        typeControl.selectedSegment = 0
+        // Reopen on the tab used last time (remembered across
+        // relaunches); All on first run.
+        if let saved = UserDefaults.standard.string(forKey: "ClipKeepTypeFilter"),
+           let idx = typeFilters.firstIndex(of: saved) {
+            typeControl.selectedSegment = idx
+        } else {
+            typeControl.selectedSegment = 0
+        }
         typeControl.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(typeControl)
 
@@ -1297,6 +1372,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     }
 
     @objc func filterChanged() {
+        // Remember the type tab across relaunches. The board/app
+        // popups share this action; re-writing the current tab
+        // when they change is harmless.
+        UserDefaults.standard.set(typeFilters[max(0, typeControl?.selectedSegment ?? 0)],
+                                  forKey: "ClipKeepTypeFilter")
         refreshList()
     }
 
@@ -1432,9 +1512,30 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             // Say WHY the list is empty. The old single message
             // ("copy something…") also appeared when filters were
             // hiding a full history, which read as lost data.
-            emptyLabel.stringValue = store.items.isEmpty
-                ? "Nothing here yet — copy something and it will show up."
-                : "Nothing matches the current search or filters.\n\(store.items.count) clip\(store.items.count == 1 ? "" : "s") in history — clear the search or widen the filters to see them."
+            if store.items.isEmpty {
+                emptyLabel.stringValue = "Nothing here yet — copy something and it will show up."
+            } else {
+                // If the current tab has never held a clip, say so
+                // in the tab's own terms instead of blaming filters.
+                let type = typeFilters[max(0, typeControl?.selectedSegment ?? 0)]
+                let inTab: Int
+                switch type {
+                case "link": inTab = store.items.filter { isLinkItem($0) }.count
+                case "text": inTab = store.items.filter { $0.kind == "text" && !isLinkItem($0) }.count
+                case "all": inTab = store.items.count
+                default: inTab = store.items.filter { $0.kind == type }.count
+                }
+                let tabHints = ["text": "No text clips yet — copy some text and it will show up here.",
+                                "link": "No links yet — copy a URL and it will show up here.",
+                                "image": "No images yet — copy an image and it will show up here.",
+                                "file": "No files yet — copy a file in Finder and it will show up here.",
+                                "color": "No colours yet — copy a colour, or a #hex / rgb() string, and it will show up here."]
+                if inTab == 0, let hint = tabHints[type] {
+                    emptyLabel.stringValue = hint + "\n\(store.items.count) clip\(store.items.count == 1 ? "" : "s") in history — the other tabs still show them."
+                } else {
+                    emptyLabel.stringValue = "Nothing matches the current search or filters.\n\(store.items.count) clip\(store.items.count == 1 ? "" : "s") in history — clear the search or widen the filters to see them."
+                }
+            }
         }
 
         if boardFilter == nil {
