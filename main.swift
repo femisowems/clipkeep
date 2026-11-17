@@ -1008,8 +1008,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         button.title = text
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
             guard let self, self.menuFlashGeneration == gen else { return }
-            self.statusItem?.button?.attributedTitle = nil
             self.statusItem?.button?.title = "📋"
+            self.statusItem?.button?.attributedTitle = NSAttributedString(string: "📋")
         }
     }
 
