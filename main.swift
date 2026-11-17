@@ -981,10 +981,30 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         // the validated frame must be the last word, applied after
         // the content view and its constraints exist.
 
-        let content = NSView()
-        content.wantsLayer = true
-        content.layer?.backgroundColor = NSColor(red: 0.961, green: 0.961, blue: 0.969, alpha: 1).cgColor
+        // Frosted vibrancy background (v2.3.1, Femi's pick from the
+        // mock: Warm Tint). An NSVisualEffectView replaces the flat
+        // light-grey layer: the desktop blurs through the panel,
+        // and a translucent cream overlay gives it Paste's warmth.
+        // The tint is added first, so every control sits above it.
+        let content = NSVisualEffectView()
+        content.material = .hudWindow
+        content.blendingMode = .behindWindow
+        content.state = .active
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
         panel.contentView = content
+
+        let tint = NSView()
+        tint.wantsLayer = true
+        tint.layer?.backgroundColor = NSColor(red: 0.98, green: 0.945, blue: 0.87, alpha: 0.45).cgColor
+        tint.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(tint)
+        NSLayoutConstraint.activate([
+            tint.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            tint.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            tint.topAnchor.constraint(equalTo: content.topAnchor),
+            tint.bottomAnchor.constraint(equalTo: content.bottomAnchor)
+        ])
 
         searchField = NSSearchField()
         searchField.placeholderString = "Search history, apps, text inside images…"
