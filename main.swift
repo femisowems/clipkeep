@@ -172,6 +172,15 @@ final class FlippedView: NSView {
     override var isFlipped: Bool { true }
 }
 
+// The card feed's stack view, flipped to match its document view.
+// Unflipped, its .top alignment resolved to the VISUAL bottom for
+// any arranged view shorter than the stack itself — cards parked
+// at the bottom of the panel under a large empty area (Femi's
+// Nov 17 Loom demo). Flipped, .top means the visual top.
+final class FlippedStackView: NSStackView {
+    override var isFlipped: Bool { true }
+}
+
 // Click target laid over a card: left-click pastes the clip,
 // right-click presents the card's context menu. An NSButton
 // overlay was used before, but buttons swallow right-clicks
@@ -420,13 +429,36 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         writeToPasteboard(item)
     }
 
+    // Copy plain text only (an image clip's OCR text); the panel
+    // stays open, like copyBack.
+    func copyText(_ text: String) {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(text, forType: .string)
+        selfWriteChangeCount = pb.changeCount
+    }
+
     func pasteBack(_ item: ClipItem) {
         writeToPasteboard(item)
         panel.orderOut(nil)
+        simulatePaste()
+    }
 
-        // If Accessibility is granted, press ⌘V in the app underneath
-        // so the item lands where the cursor is. Otherwise it is on
-        // the clipboard and a manual ⌘V does it.
+    // Paste plain text (an image clip's OCR text) the same way:
+    // clipboard, panel away, ⌘V into the app underneath.
+    func pasteText(_ text: String) {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(text, forType: .string)
+        selfWriteChangeCount = pb.changeCount
+        panel.orderOut(nil)
+        simulatePaste()
+    }
+
+    // If Accessibility is granted, press ⌘V in the app underneath
+    // so the paste lands where the cursor is. Otherwise the content
+    // is on the clipboard and a manual ⌘V does it.
+    func simulatePaste() {
         if AXIsProcessTrusted() {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
                 let src = CGEventSource(stateID: .combinedSessionState)
@@ -678,12 +710,34 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                 fullWidth(iv)
             }
             if let ocr = item.ocrText, !ocr.isEmpty {
-                let label = NSTextField(wrappingLabelWithString: ocr)
-                label.isSelectable = true
-                label.font = NSFont.systemFont(ofSize: 12)
-                label.textColor = .secondaryLabelColor
-                stack.addArrangedSubview(label)
-                fullWidth(label)
+                // Full OCR text: selectable, in its own scroll view
+                // so a long result can't push the buttons off the
+                // window. Copy Text / Paste as Text are in the
+                // button row below.
+                let scroll = NSScrollView()
+                scroll.hasVerticalScroller = true
+                scroll.borderType = .bezelBorder
+                scroll.translatesAutoresizingMaskIntoConstraints = false
+                scroll.heightAnchor.constraint(equalToConstant: 130).isActive = true
+                let textView = NSTextView()
+                textView.string = ocr
+                textView.font = NSFont.systemFont(ofSize: 12)
+                textView.isEditable = false
+                textView.isSelectable = true
+                textView.isRichText = false
+                textView.minSize = NSSize(width: 0, height: 0)
+                textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+                textView.isVerticallyResizable = true
+                textView.isHorizontallyResizable = false
+                textView.autoresizingMask = [.width]
+                textView.textContainer?.widthTracksTextView = true
+                scroll.documentView = textView
+                stack.addArrangedSubview(scroll)
+                fullWidth(scroll)
+                let note = NSTextField(labelWithString: "Text found in this image — select it here, or use Copy Text / Paste as Text below.")
+                note.font = NSFont.systemFont(ofSize: 11)
+                note.textColor = .secondaryLabelColor
+                stack.addArrangedSubview(note)
             }
         case "file":
             if let path = item.filePath {
@@ -758,6 +812,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             reveal.bezelStyle = .rounded
             buttons.addArrangedSubview(reveal)
         }
+        if item.kind == "image", let ocr = item.ocrText, !ocr.isEmpty {
+            let copyTextBtn = NSButton(title: "Copy Text", target: self, action: #selector(previewCopyTextClicked))
+            copyTextBtn.bezelStyle = .rounded
+            buttons.addArrangedSubview(copyTextBtn)
+            let pasteTextBtn = NSButton(title: "Paste as Text", target: self, action: #selector(previewPasteTextClicked))
+            pasteTextBtn.bezelStyle = .rounded
+            buttons.addArrangedSubview(pasteTextBtn)
+        }
         if item.kind == "text" {
             let save = NSButton(title: "Save changes", target: self, action: #selector(previewSaveClicked))
             save.bezelStyle = .rounded
@@ -781,6 +843,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     @objc func previewCopyClicked() {
         guard let item = previewItem() else { return }
         copyBack(item)
+    }
+
+    @objc func previewCopyTextClicked() {
+        guard let item = previewItem(), let ocr = item.ocrText else { return }
+        copyText(ocr)
+    }
+
+    @objc func previewPasteTextClicked() {
+        guard let item = previewItem(), let ocr = item.ocrText else { return }
+        previewWindow?.orderOut(nil)
+        pasteText(ocr)
     }
 
     @objc func previewRevealClicked() {
@@ -823,6 +896,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         }
         add("Paste", #selector(menuPaste(_:)))
         add("Copy", #selector(menuCopy(_:)))
+        if item.kind == "image", let ocr = item.ocrText,
+           !ocr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            add("Copy Text", #selector(menuCopyText(_:)))
+            add("Paste as Text", #selector(menuPasteText(_:)))
+        }
         add("Preview / Edit…", #selector(menuPreview(_:)))
         menu.addItem(NSMenuItem.separator())
         add(item.pinned ? "Unpin" : "Pin", #selector(menuPin(_:)))
@@ -855,6 +933,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
     @objc func menuPaste(_ sender: NSMenuItem) { if let i = item(for: sender) { pasteBack(i) } }
     @objc func menuCopy(_ sender: NSMenuItem) { if let i = item(for: sender) { copyBack(i) } }
+    @objc func menuCopyText(_ sender: NSMenuItem) { if let i = item(for: sender), let ocr = i.ocrText { copyText(ocr) } }
+    @objc func menuPasteText(_ sender: NSMenuItem) { if let i = item(for: sender), let ocr = i.ocrText { pasteText(ocr) } }
     @objc func menuPreview(_ sender: NSMenuItem) { if let i = item(for: sender) { openPreview(for: i) } }
     @objc func menuPin(_ sender: NSMenuItem) { if let i = item(for: sender) { togglePin(id: i.id) } }
     @objc func menuStack(_ sender: NSMenuItem) {
@@ -974,7 +1054,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(scrollView)
 
-        listStack = NSStackView()
+        // Flipped to match the document view — see FlippedStackView.
+        listStack = FlippedStackView()
         listStack.orientation = .horizontal
         listStack.alignment = .top
         listStack.spacing = 12
@@ -1115,6 +1196,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         savePanelFrame()
     }
 
+    // Paste behaviour: the panel is a guest. When it loses key
+    // status — the user clicked another app, or activated one from
+    // the Dock — it steps aside instead of floating over that app's
+    // windows (the Nov 17 "can't open anything else" demo). It
+    // stays open when one of our own auxiliary windows (Preview,
+    // Excluded Apps) takes key, or while a modal alert is up:
+    // those are part of using the panel, not leaving it.
+    func windowDidResignKey(_ notification: Notification) {
+        guard let w = notification.object as? NSWindow, w === panel, panel.isVisible else { return }
+        if NSApp.modalWindow != nil { return }
+        if let key = NSApp.keyWindow, (key === previewWindow || key === exclusionsWindow) { return }
+        panel.orderOut(nil)
+    }
+
     func controlTextDidChange(_ obj: Notification) {
         refreshList()
     }
@@ -1241,7 +1336,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             let banner = updateBanner(version: upd.version)
             listStack.addArrangedSubview(banner)
             banner.widthAnchor.constraint(equalToConstant: 300).isActive = true
-            banner.heightAnchor.constraint(equalTo: listStack.heightAnchor).isActive = true
+            // No height pin to the stack: the banner has its own
+            // 36pt height and top-aligns like the cards.
         }
 
         let items = visibleItems()
@@ -1271,10 +1367,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     func addRow(_ item: ClipItem, index: Int) {
         let row = rowView(for: item, index: index)
         listStack.addArrangedSubview(row)
-        // Fixed-width cards in the horizontal feed; the card's
-        // height fills the list.
+        // Fixed-width cards in the horizontal feed. Height is the
+        // card's own natural height — the old heightAnchor pin to
+        // the stack stretched cards to full panel height and left
+        // them mostly blank inside (the other mood in the demo).
         row.widthAnchor.constraint(equalToConstant: 300).isActive = true
-        row.heightAnchor.constraint(equalTo: listStack.heightAnchor).isActive = true
         // The current clip (⌘1) gets Paste's blue selection outline.
         if index == 0 {
             row.layer?.borderColor = NSColor.controlAccentColor.cgColor
@@ -1534,14 +1631,46 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             iv.heightAnchor.constraint(equalToConstant: 150).isActive = true
             body.addArrangedSubview(iv)
             fullWidth(iv)
-            if let ocr = item.ocrText, !ocr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                let ocrLabel = NSTextField(wrappingLabelWithString: ocr)
-                ocrLabel.font = NSFont.systemFont(ofSize: 11)
-                ocrLabel.textColor = .secondaryLabelColor
-                ocrLabel.maximumNumberOfLines = 2
-                ocrLabel.lineBreakMode = .byTruncatingTail
-                body.addArrangedSubview(ocrLabel)
-                fullWidth(ocrLabel)
+            // OCR text no longer prints on the card — the wrapping
+            // label grew to the full text and swamped it. The card
+            // shows a "Contains text" chip + one-line teaser; the
+            // full text lives in Preview. No text → dimensions.
+            let ocrText = item.ocrText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !ocrText.isEmpty {
+                let metaRow = NSStackView()
+                metaRow.orientation = .horizontal
+                metaRow.alignment = .centerY
+                metaRow.spacing = 6
+                let chip = NSView()
+                chip.wantsLayer = true
+                chip.layer?.backgroundColor = NSColor(white: 0.92, alpha: 1).cgColor
+                chip.layer?.cornerRadius = 6
+                chip.translatesAutoresizingMaskIntoConstraints = false
+                let chipLabel = NSTextField(labelWithString: "Contains text")
+                chipLabel.font = NSFont.systemFont(ofSize: 9.5, weight: .semibold)
+                chipLabel.textColor = .secondaryLabelColor
+                chipLabel.translatesAutoresizingMaskIntoConstraints = false
+                chip.addSubview(chipLabel)
+                NSLayoutConstraint.activate([
+                    chipLabel.leadingAnchor.constraint(equalTo: chip.leadingAnchor, constant: 6),
+                    chipLabel.trailingAnchor.constraint(equalTo: chip.trailingAnchor, constant: -6),
+                    chipLabel.topAnchor.constraint(equalTo: chip.topAnchor, constant: 2),
+                    chipLabel.bottomAnchor.constraint(equalTo: chip.bottomAnchor, constant: -2)
+                ])
+                metaRow.addArrangedSubview(chip)
+                let teaser = NSTextField(labelWithString: String(ocrText.split(separator: "\n").first ?? ""))
+                teaser.font = NSFont.systemFont(ofSize: 11)
+                teaser.textColor = .secondaryLabelColor
+                teaser.lineBreakMode = .byTruncatingTail
+                teaser.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+                metaRow.addArrangedSubview(teaser)
+                body.addArrangedSubview(metaRow)
+                fullWidth(metaRow)
+            } else if let img = iv.image, let rep = img.representations.first {
+                let dims = NSTextField(labelWithString: "\(rep.pixelsWide) × \(rep.pixelsHigh)")
+                dims.font = NSFont.systemFont(ofSize: 11)
+                dims.textColor = .secondaryLabelColor
+                body.addArrangedSubview(dims)
             }
         case "file":
             let row = NSStackView()
