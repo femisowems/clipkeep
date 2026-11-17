@@ -1688,7 +1688,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     // MARK: Panel UI
 
     func buildPanel() {
-        panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: defaultPanelHeight),
+        panel = NSWindow(contentRect: defaultPanelFrame(),
                          styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
                          backing: .buffered, defer: false)
         panel.title = "ClipKeep"
@@ -2060,6 +2060,27 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         return NSScreen.screens.contains { $0.visibleFrame.intersects(f) }
     }
 
+    // The one default frame — exactly what Reset Panel Size
+    // applies: full physical width, defaultPanelHeight tall,
+    // sitting on the bottom of the main screen's visible frame
+    // (above the Dock) — the size Femi settled on in his Nov 17
+    // Loom. Width and x come from the screen's frame (edge to
+    // edge); only the bottom anchor uses the visible frame, so
+    // the panel clears the Dock but ignores side reservations
+    // like Stage Manager's strip. Panel creation, frame restore,
+    // and Reset all take the default from here, so the app's
+    // built-in default IS the Reset size and the two can never
+    // drift apart (Femi's request, Nov 17 — previously the panel
+    // was created at 1100 wide in the corner and only became the
+    // full-width strip if the restore path ran).
+    private func defaultPanelFrame() -> NSRect {
+        if let screen = NSScreen.main {
+            let f = screen.frame, vf = screen.visibleFrame
+            return NSRect(x: f.minX, y: vf.minY, width: f.width, height: defaultPanelHeight)
+        }
+        return NSRect(x: 0, y: 0, width: 1100, height: defaultPanelHeight)
+    }
+
     private func restorePanelFrame() {
         if let saved = UserDefaults.standard.string(forKey: panelFrameKey) {
             let f = NSRectFromString(saved)
@@ -2068,20 +2089,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                 return
             }
         }
-        // Default: full physical width, 520 tall, sitting on the
-        // bottom of the main screen's visible frame (above the
-        // Dock) — the size Femi settled on in his Nov 17 Loom.
-        // Width and x come from the screen's frame (edge to edge);
-        // only the bottom anchor uses the visible frame, so the
-        // panel clears the Dock but ignores side reservations
-        // like Stage Manager's strip.
-        if let screen = NSScreen.main {
-            let f = screen.frame, vf = screen.visibleFrame
-            panel.setFrame(NSRect(x: f.minX, y: vf.minY, width: f.width, height: defaultPanelHeight), display: false)
-        } else {
-            panel.setFrame(NSRect(x: 0, y: 0, width: 1100, height: defaultPanelHeight), display: false)
-            panel.center()
-        }
+        panel.setFrame(defaultPanelFrame(), display: false)
+        if NSScreen.main == nil { panel.center() }
     }
 
     private func savePanelFrame() {
