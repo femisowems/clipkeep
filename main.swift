@@ -1650,6 +1650,65 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
     // MARK: Card context menu
 
+    // MARK: Quick actions (roadmap #1, v2.8.0)
+    //
+    // Text transformations, reached from the card's right-click
+    // Transform submenu. Each pastes the transformed text via
+    // pasteText (panel closes, menu bar flashes as usual); Copy
+    // as Markdown Link copies instead and stays, like Copy. The
+    // submenu only offers transforms that apply: Pretty JSON
+    // appears only when the text parses as JSON and printing it
+    // changes it; Extract Links only when the text has a URL.
+    func extractURLs(_ text: String) -> [String] {
+        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return [] }
+        let range = NSRange(text.startIndex..., in: text)
+        return detector.matches(in: text, range: range).compactMap { $0.url?.absoluteString }
+    }
+
+    func prettyJSON(_ text: String) -> String? {
+        guard let data = text.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data),
+              JSONSerialization.isValidJSONObject(obj),
+              let pretty = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]),
+              let s = String(data: pretty, encoding: .utf8),
+              s != text.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+        return s
+    }
+
+    // Trim each line, drop the ragged ends, and collapse runs of
+    // blank lines to one — the "clean this paste up" transform.
+    func trimmedText(_ text: String) -> String {
+        var out: [String] = []
+        var lastBlank = false
+        for raw in text.components(separatedBy: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty {
+                if lastBlank { continue }
+                lastBlank = true
+            } else {
+                lastBlank = false
+            }
+            out.append(line)
+        }
+        return out.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @objc func menuTransformPlain(_ sender: NSMenuItem) { if let i = item(for: sender), let t = i.text { pasteText(t) } }
+    @objc func menuTransformUpper(_ sender: NSMenuItem) { if let i = item(for: sender), let t = i.text { pasteText(t.uppercased()) } }
+    @objc func menuTransformLower(_ sender: NSMenuItem) { if let i = item(for: sender), let t = i.text { pasteText(t.lowercased()) } }
+    @objc func menuTransformTitle(_ sender: NSMenuItem) { if let i = item(for: sender), let t = i.text { pasteText(t.capitalized) } }
+    @objc func menuTransformTrim(_ sender: NSMenuItem) { if let i = item(for: sender), let t = i.text { pasteText(trimmedText(t)) } }
+    @objc func menuTransformJSON(_ sender: NSMenuItem) { if let i = item(for: sender), let t = i.text, let p = prettyJSON(t) { pasteText(p) } }
+    @objc func menuTransformLinks(_ sender: NSMenuItem) { if let i = item(for: sender), let t = i.text { pasteText(extractURLs(t).joined(separator: "\n")) } }
+    @objc func menuCopyMarkdown(_ sender: NSMenuItem) {
+        if let i = item(for: sender), let t = i.text {
+            let url = t.trimmingCharacters(in: .whitespacesAndNewlines)
+            let title: String
+            if let lt = i.linkTitle, !lt.isEmpty { title = lt } else { title = url }
+            copyText("[\(title)](\(url))", item: i)
+        }
+    }
+
     func cardMenu(for item: ClipItem) -> NSMenu {
         let menu = NSMenu()
         func add(_ title: String, _ action: Selector) {
@@ -1668,6 +1727,28 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         if item.kind == "color" {
             add("Copy as RGB", #selector(menuCopyRGB(_:)))
             add("Copy as HSL", #selector(menuCopyHSL(_:)))
+        }
+        if item.kind == "text", let text = item.text, !text.isEmpty {
+            let transformItem = NSMenuItem(title: "Transform", action: nil, keyEquivalent: "")
+            let tsub = NSMenu()
+            func tadd(_ title: String, _ action: Selector) {
+                let mi = NSMenuItem(title: title, action: action, keyEquivalent: "")
+                mi.target = self
+                mi.identifier = NSUserInterfaceItemIdentifier(item.id)
+                tsub.addItem(mi)
+            }
+            tadd("Paste as Plain Text", #selector(menuTransformPlain(_:)))
+            tadd("Paste UPPERCASE", #selector(menuTransformUpper(_:)))
+            tadd("Paste lowercase", #selector(menuTransformLower(_:)))
+            tadd("Paste Title Case", #selector(menuTransformTitle(_:)))
+            tadd("Paste Trimmed", #selector(menuTransformTrim(_:)))
+            if prettyJSON(text) != nil { tadd("Paste Pretty JSON", #selector(menuTransformJSON(_:))) }
+            if !extractURLs(text).isEmpty { tadd("Paste Extracted Links", #selector(menuTransformLinks(_:))) }
+            transformItem.submenu = tsub
+            menu.addItem(transformItem)
+            if isLinkItem(item) {
+                add("Copy as Markdown Link", #selector(menuCopyMarkdown(_:)))
+            }
         }
         add("Preview / Edit…", #selector(menuPreview(_:)))
         menu.addItem(NSMenuItem.separator())
