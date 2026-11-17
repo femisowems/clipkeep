@@ -227,6 +227,38 @@ func colorFromHex(_ hex: String) -> NSColor? {
                    blue: CGFloat(value & 0xFF) / 255, alpha: 1)
 }
 
+// A colour written out as text: the WHOLE string must be the
+// literal, so a sentence mentioning a colour stays text. Accepts
+// #RGB, #RRGGBB, rgb(r, g, b) and rgba(r, g, b, 1) — a translucent
+// rgba stays text, because colour clips store an opaque hex and
+// would misrepresent it.
+func colorFromLiteral(_ raw: String) -> NSColor? {
+    let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    if s.hasPrefix("#") {
+        let digits = String(s.dropFirst())
+        guard digits.allSatisfy({ $0.isHexDigit }) else { return nil }
+        if digits.count == 3 {
+            return colorFromHex("#" + digits.map { "\($0)\($0)" }.joined())
+        }
+        return digits.count == 6 ? colorFromHex(s) : nil
+    }
+    let lower = s.lowercased()
+    let isRGBA = lower.hasPrefix("rgba(")
+    guard isRGBA || lower.hasPrefix("rgb("), s.hasSuffix(")") else { return nil }
+    let inner = s.dropFirst(isRGBA ? 5 : 4).dropLast()
+    let parts = inner.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+    guard parts.count == 3 || parts.count == 4 else { return nil }
+    var rgb: [CGFloat] = []
+    for p in parts.prefix(3) {
+        guard let v = Int(p), (0...255).contains(v) else { return nil }
+        rgb.append(CGFloat(v) / 255)
+    }
+    if parts.count == 4 {
+        guard let a = Double(parts[3]), a == 1 else { return nil }
+    }
+    return NSColor(srgbRed: rgb[0], green: rgb[1], blue: rgb[2], alpha: 1)
+}
+
 // MARK: - App
 
 final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegate, NSWindowDelegate {
@@ -367,8 +399,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             return
         }
 
-        // Plain text.
+        // Plain text — except a colour literal, which files as a
+        // colour (the real .color payload above still wins when an
+        // app provides one).
         if let text = pb.string(forType: .string), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if let color = colorFromLiteral(text) {
+                let hex = hexString(from: color)
+                if store.items.first?.kind == "color" && store.items.first?.text == hex { return }
+                store.insert(ClipItem(id: UUID().uuidString, kind: "color", text: hex, imageFile: nil,
+                                      createdAt: now, pinned: false, filePath: nil,
+                                      sourceApp: sourceName, sourceBundleID: sourceBundle,
+                                      ocrText: nil, board: nil, contentHash: nil))
+                refreshList()
+                return
+            }
             if store.items.first?.kind == "text" && store.items.first?.text == text { return }
             let newItem = ClipItem(id: UUID().uuidString, kind: "text", text: text,
                                    imageFile: nil, createdAt: now, pinned: false, filePath: nil,
