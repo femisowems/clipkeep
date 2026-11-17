@@ -200,6 +200,86 @@ final class ClickView: NSView {
     }
 }
 
+// MARK: Panel themes (v2.5.0)
+//
+// Four switchable panel themes, mocked Nov 17 and picked by
+// Femi (A Warm Tint, B Midnight, E Ember, F Lagoon — Matcha,
+// Bloom, and the greys didn't make the cut). A theme drives the
+// panel tint, the accent, the card surface, and every button
+// wash; the choice persists in UserDefaults "ClipKeepTheme".
+struct PanelTheme {
+    let id: String
+    let name: String
+    let dark: Bool
+    let tint: NSColor
+    let accent: NSColor
+    let onAccent: NSColor
+    let cardBG: NSColor
+    let cardBorder: NSColor
+    let trackBG: NSColor
+    let fieldBG: NSColor
+    let fieldHoverBG: NSColor
+    let fieldBorder: NSColor
+    let hoverWash: NSColor
+    let pressedWash: NSColor
+    let badgeBG: NSColor
+}
+
+let panelThemes: [PanelTheme] = [
+    PanelTheme(id: "warm", name: "Warm Tint", dark: false,
+               tint: NSColor(red: 0.98, green: 0.945, blue: 0.87, alpha: 0.45),
+               accent: NSColor(red: 0, green: 0.478, blue: 1, alpha: 1),
+               onAccent: .white,
+               cardBG: .white,
+               cardBorder: NSColor(red: 0.89, green: 0.89, blue: 0.91, alpha: 1),
+               trackBG: NSColor(white: 0, alpha: 0.06),
+               fieldBG: NSColor(white: 1, alpha: 0.55),
+               fieldHoverBG: NSColor(white: 1, alpha: 0.82),
+               fieldBorder: NSColor(white: 0, alpha: 0.10),
+               hoverWash: NSColor(white: 0, alpha: 0.06),
+               pressedWash: NSColor(white: 0, alpha: 0.12),
+               badgeBG: NSColor(white: 0, alpha: 0.10)),
+    PanelTheme(id: "midnight", name: "Midnight", dark: true,
+               tint: NSColor(red: 0.07, green: 0.09, blue: 0.15, alpha: 0.60),
+               accent: NSColor(red: 0.49, green: 0.48, blue: 1, alpha: 1),
+               onAccent: .white,
+               cardBG: NSColor(red: 0.137, green: 0.173, blue: 0.239, alpha: 1),
+               cardBorder: NSColor(white: 1, alpha: 0.10),
+               trackBG: NSColor(white: 1, alpha: 0.10),
+               fieldBG: NSColor(white: 1, alpha: 0.09),
+               fieldHoverBG: NSColor(white: 1, alpha: 0.16),
+               fieldBorder: NSColor(white: 1, alpha: 0.13),
+               hoverWash: NSColor(white: 1, alpha: 0.10),
+               pressedWash: NSColor(white: 1, alpha: 0.16),
+               badgeBG: NSColor(white: 1, alpha: 0.14)),
+    PanelTheme(id: "ember", name: "Ember", dark: true,
+               tint: NSColor(red: 0.13, green: 0.08, blue: 0.05, alpha: 0.60),
+               accent: NSColor(red: 1, green: 0.624, blue: 0.263, alpha: 1),
+               onAccent: NSColor(red: 0.14, green: 0.07, blue: 0.02, alpha: 1),
+               cardBG: NSColor(red: 0.227, green: 0.165, blue: 0.125, alpha: 1),
+               cardBorder: NSColor(white: 1, alpha: 0.10),
+               trackBG: NSColor(white: 1, alpha: 0.10),
+               fieldBG: NSColor(white: 1, alpha: 0.08),
+               fieldHoverBG: NSColor(white: 1, alpha: 0.15),
+               fieldBorder: NSColor(white: 1, alpha: 0.13),
+               hoverWash: NSColor(white: 1, alpha: 0.10),
+               pressedWash: NSColor(white: 1, alpha: 0.16),
+               badgeBG: NSColor(white: 1, alpha: 0.14)),
+    PanelTheme(id: "lagoon", name: "Lagoon", dark: true,
+               tint: NSColor(red: 0.02, green: 0.13, blue: 0.13, alpha: 0.60),
+               accent: NSColor(red: 0.176, green: 0.831, blue: 0.749, alpha: 1),
+               onAccent: NSColor(red: 0.02, green: 0.19, blue: 0.16, alpha: 1),
+               cardBG: NSColor(red: 0.067, green: 0.251, blue: 0.247, alpha: 1),
+               cardBorder: NSColor(white: 1, alpha: 0.10),
+               trackBG: NSColor(white: 1, alpha: 0.10),
+               fieldBG: NSColor(white: 1, alpha: 0.08),
+               fieldHoverBG: NSColor(white: 1, alpha: 0.15),
+               fieldBorder: NSColor(white: 1, alpha: 0.13),
+               hoverWash: NSColor(white: 1, alpha: 0.10),
+               pressedWash: NSColor(white: 1, alpha: 0.16),
+               badgeBG: NSColor(white: 1, alpha: 0.14))
+]
+
 // MARK: Button overhaul (v2.4.0)
 //
 // One button system across the panel, replacing the stock
@@ -332,15 +412,29 @@ final class PillTabButton: HoverButton {
 
     func setCount(_ n: Int) { badgeLabel.stringValue = "\(n)" }
 
+    // Theme-driven colours (Warm Tint values until a theme is
+    // applied): the selected pill's content colour, the resting
+    // badge wash, and the hover wash for unselected pills.
+    private var selectedFG: NSColor = .white
+    private var badgeBGUnselected: NSColor = NSColor(white: 0, alpha: 0.10)
+    private var hoverWashUnselected: NSColor = NSColor(white: 0, alpha: 0.07)
+
+    func applyTheme(_ theme: PanelTheme) {
+        selectedFG = theme.onAccent
+        badgeBGUnselected = theme.badgeBG
+        hoverWashUnselected = theme.hoverWash
+        setCurrent(isCurrent)
+    }
+
     func setCurrent(_ on: Bool) {
         isCurrent = on
-        let fg: NSColor = on ? .white : .labelColor
+        let fg: NSColor = on ? selectedFG : .labelColor
         titleLabel.textColor = fg
         iconView.contentTintColor = fg
-        badgeLabel.textColor = on ? .white : .secondaryLabelColor
-        badgeView.layer?.backgroundColor = (on ? NSColor.white.withAlphaComponent(0.30)
-                                              : NSColor(white: 0, alpha: 0.10)).cgColor
-        hoverBG = on ? .clear : NSColor(white: 0, alpha: 0.07)
+        badgeLabel.textColor = on ? selectedFG : .secondaryLabelColor
+        badgeView.layer?.backgroundColor = (on ? selectedFG.withAlphaComponent(0.30)
+                                              : badgeBGUnselected).cgColor
+        hoverBG = on ? .clear : hoverWashUnselected
     }
 }
 
@@ -407,6 +501,13 @@ final class PillTabsView: NSView {
         for pill in pills { pill.setCount(counts[pill.typeValue] ?? 0) }
     }
 
+    func applyTheme(_ theme: PanelTheme) {
+        layer?.backgroundColor = theme.trackBG.cgColor
+        indicator.layer?.backgroundColor = theme.accent.cgColor
+        indicator.layer?.shadowColor = theme.accent.cgColor
+        for pill in pills { pill.applyTheme(theme) }
+    }
+
     override func layout() {
         super.layout()
         positionIndicator(animated: false)
@@ -435,6 +536,8 @@ final class PillTabsView: NSView {
 final class ToolbarShell: NSView {
     private var hovering = false
     private var hoverArea: NSTrackingArea?
+    private var fieldBG: NSColor = NSColor(white: 1, alpha: 0.55)
+    private var fieldHoverBG: NSColor = NSColor(white: 1, alpha: 0.82)
 
     init(popup: NSPopUpButton) {
         super.init(frame: .zero)
@@ -466,9 +569,14 @@ final class ToolbarShell: NSView {
     }
     override func mouseEntered(with event: NSEvent) { hovering = true; applyHover() }
     override func mouseExited(with event: NSEvent) { hovering = false; applyHover() }
+    func applyTheme(_ theme: PanelTheme) {
+        fieldBG = theme.fieldBG
+        fieldHoverBG = theme.fieldHoverBG
+        layer?.borderColor = theme.fieldBorder.cgColor
+        applyHover()
+    }
     private func applyHover() {
-        layer?.backgroundColor = (hovering ? NSColor(white: 1, alpha: 0.82)
-                                           : NSColor(white: 1, alpha: 0.55)).cgColor
+        layer?.backgroundColor = (hovering ? fieldHoverBG : fieldBG).cgColor
         layer?.shadowColor = NSColor.black.cgColor
         layer?.shadowOpacity = hovering ? 0.12 : 0
         layer?.shadowRadius = 4
@@ -612,6 +720,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     var recencyPopup: NSPopUpButton!
     var sortPopup: NSPopUpButton!
     var sortShell: ToolbarShell!
+    var tintView: NSView!
+    var overflowButton: HoverButton!
+    var toolbarShells: [ToolbarShell] = []
+    var currentTheme: PanelTheme = panelThemes[0]
     var copiedPill: NSTextField!
     var stackBar: NSStackView!
     var stackLabel: NSTextField!
@@ -1020,12 +1132,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     func updateBanner(version: String) -> NSView {
         let banner = NSView()
         banner.wantsLayer = true
-        banner.layer?.backgroundColor = NSColor(red: 0.890, green: 0.945, blue: 1.0, alpha: 1).cgColor
+        banner.layer?.backgroundColor = currentTheme.accent.withAlphaComponent(0.16).cgColor
         banner.layer?.cornerRadius = 10
         banner.translatesAutoresizingMaskIntoConstraints = false
         let label = NSTextField(labelWithString: "ClipKeep \(version) is available")
         label.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
-        label.textColor = NSColor(red: 0.05, green: 0.30, blue: 0.65, alpha: 1)
+        label.textColor = currentTheme.accent
         label.translatesAutoresizingMaskIntoConstraints = false
         banner.addSubview(label)
         let download = NSButton(title: "Download", target: self, action: #selector(updateDownloadClicked))
@@ -1412,16 +1524,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         panel.backgroundColor = .clear
         panel.contentView = content
 
-        let tint = NSView()
-        tint.wantsLayer = true
-        tint.layer?.backgroundColor = NSColor(red: 0.98, green: 0.945, blue: 0.87, alpha: 0.45).cgColor
-        tint.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(tint)
+        tintView = NSView()
+        tintView.wantsLayer = true
+        tintView.layer?.backgroundColor = NSColor(red: 0.98, green: 0.945, blue: 0.87, alpha: 0.45).cgColor
+        tintView.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(tintView)
         NSLayoutConstraint.activate([
-            tint.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            tint.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            tint.topAnchor.constraint(equalTo: content.topAnchor),
-            tint.bottomAnchor.constraint(equalTo: content.bottomAnchor)
+            tintView.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            tintView.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            tintView.topAnchor.constraint(equalTo: content.topAnchor),
+            tintView.bottomAnchor.constraint(equalTo: content.bottomAnchor)
         ])
 
         searchField = NSSearchField()
@@ -1498,6 +1610,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         sortShell = ToolbarShell(popup: sortPopup)
         sortShell.isHidden = true
         content.addSubview(sortShell)
+        toolbarShells = [boardShell, appShell, recencyShell, sortShell]
 
         // Second filter row: board / source app / recency / sort,
         // each in its toolbar shell.
@@ -1583,7 +1696,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         // apps, clear, quit — plus the version) sits behind one
         // "•••" button beside the search field, leaving the panel
         // to the cards.
-        let overflowButton = HoverButton(frame: .zero)
+        overflowButton = HoverButton(frame: .zero)
         overflowButton.title = "•••"
         overflowButton.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
         overflowButton.target = self
@@ -1666,7 +1779,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             copiedPill.heightAnchor.constraint(equalToConstant: 22)
         ])
 
-        refreshList()
+        // Apply the saved theme (Warm Tint on first run); this
+        // also does the first refreshList with themed cards.
+        let savedThemeID = UserDefaults.standard.string(forKey: "ClipKeepTheme") ?? "warm"
+        applyTheme(panelThemes.first { $0.id == savedThemeID } ?? panelThemes[0], persist: false)
         restorePanelFrame()
     }
 
@@ -1769,6 +1885,35 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             store.historyLimit = value
         }
         refreshList()
+    }
+
+    // MARK: Themes
+
+    // Repaint the whole panel in a theme: appearance (the dark
+    // themes flip the panel to dark aqua so labels, fields, and
+    // menus follow), the vibrancy tint, the pill tabs, the
+    // toolbar shells, the overflow button, and — via a list
+    // refresh — every card.
+    func applyTheme(_ theme: PanelTheme, persist: Bool = true) {
+        currentTheme = theme
+        if persist {
+            UserDefaults.standard.set(theme.id, forKey: "ClipKeepTheme")
+        }
+        panel?.appearance = NSAppearance(named: theme.dark ? .darkAqua : .aqua)
+        tintView?.layer?.backgroundColor = theme.tint.cgColor
+        pillTabs?.applyTheme(theme)
+        for shell in toolbarShells { shell.applyTheme(theme) }
+        overflowButton?.normalBG = theme.fieldBG
+        overflowButton?.hoverBG = theme.fieldHoverBG
+        overflowButton?.pressedBG = theme.pressedWash
+        overflowButton?.chromeBorderColor = theme.fieldBorder
+        refreshList()
+    }
+
+    @objc func themeChosen(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String,
+              let theme = panelThemes.first(where: { $0.id == id }) else { return }
+        applyTheme(theme)
     }
 
     // MARK: Filtering + list rendering
@@ -2124,7 +2269,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         b.imagePosition = .imageOnly
         b.target = self
         b.action = action
-        b.baseTint = active ? .systemBlue : .secondaryLabelColor
+        b.baseTint = active ? currentTheme.accent : .secondaryLabelColor
+        b.hoverBG = currentTheme.hoverWash
+        b.pressedBG = currentTheme.pressedWash
         if danger {
             b.hoverTint = .systemRed
             b.hoverBG = NSColor.systemRed.withAlphaComponent(0.12)
@@ -2141,10 +2288,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
         let card = NSView()
         card.wantsLayer = true
-        card.layer?.backgroundColor = NSColor.white.cgColor
+        card.layer?.backgroundColor = currentTheme.cardBG.cgColor
         card.layer?.cornerRadius = 14
         card.layer?.borderWidth = 1
-        card.layer?.borderColor = NSColor(red: 0.89, green: 0.89, blue: 0.91, alpha: 1).cgColor
+        card.layer?.borderColor = currentTheme.cardBorder.cgColor
         card.layer?.shadowColor = NSColor.black.cgColor
         card.layer?.shadowOpacity = 0.08
         card.layer?.shadowRadius = 6
@@ -2273,7 +2420,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                 metaRow.spacing = 6
                 let chip = NSView()
                 chip.wantsLayer = true
-                chip.layer?.backgroundColor = NSColor(white: 0.92, alpha: 1).cgColor
+                chip.layer?.backgroundColor = currentTheme.trackBG.cgColor
                 chip.layer?.cornerRadius = 6
                 chip.translatesAutoresizingMaskIntoConstraints = false
                 let chipLabel = NSTextField(labelWithString: "Contains text")
@@ -2624,6 +2771,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         }
         limitItem.submenu = limitMenu
         menu.addItem(limitItem)
+        let themeItem = NSMenuItem(title: "Theme", action: nil, keyEquivalent: "")
+        let themeMenu = NSMenu()
+        for theme in panelThemes {
+            let mi = NSMenuItem(title: theme.name, action: #selector(themeChosen(_:)), keyEquivalent: "")
+            mi.target = self
+            mi.representedObject = theme.id
+            mi.state = currentTheme.id == theme.id ? .on : .off
+            themeMenu.addItem(mi)
+        }
+        themeItem.submenu = themeMenu
+        menu.addItem(themeItem)
         add("Excluded Apps…", #selector(showExclusions))
         add("Reset Panel Size", #selector(resetPanelSize))
         add("Clear History", #selector(clearHistory))
