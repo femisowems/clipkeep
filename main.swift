@@ -334,6 +334,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     var boardPopup: NSPopUpButton!
     var appPopup: NSPopUpButton!
     var recencyPopup: NSPopUpButton!
+    var sortPopup: NSPopUpButton!
+    var copiedPill: NSTextField!
     var stackBar: NSStackView!
     var stackLabel: NSTextField!
     var listStack: NSStackView!
@@ -536,6 +538,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     // writeToPasteboard records it as our own write.
     func copyBack(_ item: ClipItem) {
         writeToPasteboard(item)
+        flashCopied()
     }
 
     // Copy plain text only (an image clip's OCR text); the panel
@@ -545,6 +548,29 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         pb.clearContents()
         pb.setString(text, forType: .string)
         selfWriteChangeCount = pb.changeCount
+        flashCopied()
+    }
+
+    // Brief "✓ Copied" confirmation at the bottom of the panel.
+    // A generation counter keeps rapid copies from racing the
+    // fade-out of an earlier flash.
+    private var copiedFlashGeneration = 0
+    func flashCopied() {
+        guard copiedPill != nil, panel.isVisible else { return }
+        copiedFlashGeneration += 1
+        let gen = copiedFlashGeneration
+        copiedPill.alphaValue = 1
+        copiedPill.isHidden = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { [weak self] in
+            guard let self, self.copiedFlashGeneration == gen else { return }
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.35
+                self.copiedPill.animator().alphaValue = 0
+            }, completionHandler: { [weak self] in
+                guard let self, self.copiedFlashGeneration == gen else { return }
+                self.copiedPill.isHidden = true
+            })
+        }
     }
 
     func pasteBack(_ item: ClipItem) {
@@ -1165,8 +1191,26 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         recencyPopup.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(recencyPopup)
 
-        // Second filter row: board / source app / recency.
-        let filterBar = NSStackView(views: [boardPopup, appPopup, recencyPopup])
+        // Colours-only sort choice: recency (the default) or by
+        // hue. Hidden on every other tab — refreshList toggles it.
+        sortPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        sortPopup.controlSize = .small
+        for (title, value) in [("Recent first", "recency"), ("Sort by hue", "hue")] {
+            let mi = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            mi.representedObject = value
+            sortPopup.menu?.addItem(mi)
+        }
+        if UserDefaults.standard.string(forKey: "ClipKeepColorSort") == "hue" {
+            sortPopup.selectItem(at: 1)
+        }
+        sortPopup.target = self
+        sortPopup.action = #selector(sortChanged)
+        sortPopup.translatesAutoresizingMaskIntoConstraints = false
+        sortPopup.isHidden = true
+        content.addSubview(sortPopup)
+
+        // Second filter row: board / source app / recency / sort.
+        let filterBar = NSStackView(views: [boardPopup, appPopup, recencyPopup, sortPopup])
         filterBar.orientation = .horizontal
         filterBar.spacing = 8
         filterBar.heightAnchor.constraint(equalToConstant: 26).isActive = true
@@ -1254,6 +1298,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         overflowButton.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(overflowButton)
 
+        // "✓ Copied" pill: flashes at the bottom of the panel when
+        // a copy action lands, so a right-click Copy never feels
+        // like it did nothing. Hidden except during the flash.
+        copiedPill = NSTextField(labelWithString: "✓ Copied")
+        copiedPill.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        copiedPill.textColor = .white
+        copiedPill.alignment = .center
+        copiedPill.drawsBackground = true
+        copiedPill.backgroundColor = NSColor.black.withAlphaComponent(0.78)
+        copiedPill.wantsLayer = true
+        copiedPill.layer?.cornerRadius = 10
+        copiedPill.layer?.masksToBounds = true
+        copiedPill.isHidden = true
+        copiedPill.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(copiedPill)
+
         NSLayoutConstraint.activate([
             // The safe area starts below the title bar; anchoring to
             // content.topAnchor put the search field underneath it
@@ -1267,12 +1327,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             overflowButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
             overflowButton.widthAnchor.constraint(equalToConstant: 44),
 
+            // The tab row and the filter row are centered as
+            // groups (Femi's Nov 17 Loom: left-aligned, they sat
+            // in the panel's left third with empty space to the
+            // right). The leading floor keeps a narrow panel from
+            // pushing them off the left edge.
             typeControl.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 8),
-            typeControl.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
+            typeControl.centerXAnchor.constraint(equalTo: content.centerXAnchor),
+            typeControl.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor, constant: 10),
             typeControl.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -10),
 
             filterBar.topAnchor.constraint(equalTo: typeControl.bottomAnchor, constant: 8),
-            filterBar.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
+            filterBar.centerXAnchor.constraint(equalTo: content.centerXAnchor),
+            filterBar.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor, constant: 10),
             filterBar.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -10),
 
             stackBar.topAnchor.constraint(equalTo: filterBar.bottomAnchor, constant: 8),
@@ -1292,7 +1359,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
             emptyLabel.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
             emptyLabel.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
-            emptyLabel.widthAnchor.constraint(lessThanOrEqualTo: scrollView.widthAnchor, constant: -48)
+            emptyLabel.widthAnchor.constraint(lessThanOrEqualTo: scrollView.widthAnchor, constant: -48),
+
+            copiedPill.centerXAnchor.constraint(equalTo: content.centerXAnchor),
+            copiedPill.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -18),
+            copiedPill.widthAnchor.constraint(equalToConstant: 92),
+            copiedPill.heightAnchor.constraint(equalToConstant: 22)
         ])
 
         refreshList()
@@ -1301,11 +1373,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
     // MARK: Panel frame persistence (manual, validated)
 
-    // V5: Femi's Nov 17 Loom pick — the default is a bottom-anchored
-    // strip, full screen width and about half the screen height,
-    // not a window that opens nearly full-screen. New key so the
-    // stretched V4 frame saved earlier is retired.
-    private let panelFrameKey = "ClipKeepPanelFrameV5"
+    // V6: same bottom-anchored strip, but the width now comes
+    // from the screen's full frame, not its visible frame. V5
+    // used the visible frame, which on Femi's Mac is inset 215pt
+    // on the left (Stage Manager's strip) — the panel opened at
+    // ~87% of the display width with the whole gap on the left,
+    // which read as "only 75% wide". New key retires the V5 frame.
+    private let panelFrameKey = "ClipKeepPanelFrameV6"
 
     private func panelFrameIsUsable(_ f: NSRect) -> Bool {
         guard f.width >= panel.minSize.width, f.height >= panel.minSize.height else { return false }
@@ -1320,11 +1394,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                 return
             }
         }
-        // Default: full visible width, 520 tall, sitting on the
+        // Default: full physical width, 520 tall, sitting on the
         // bottom of the main screen's visible frame (above the
         // Dock) — the size Femi settled on in his Nov 17 Loom.
-        if let vf = NSScreen.main?.visibleFrame {
-            panel.setFrame(NSRect(x: vf.minX, y: vf.minY, width: vf.width, height: 520), display: false)
+        // Width and x come from the screen's frame (edge to edge);
+        // only the bottom anchor uses the visible frame, so the
+        // panel clears the Dock but ignores side reservations
+        // like Stage Manager's strip.
+        if let screen = NSScreen.main {
+            let f = screen.frame, vf = screen.visibleFrame
+            panel.setFrame(NSRect(x: f.minX, y: vf.minY, width: f.width, height: 520), display: false)
         } else {
             panel.setFrame(NSRect(x: 0, y: 0, width: 1100, height: 520), display: false)
             panel.center()
@@ -1377,6 +1456,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         // when they change is harmless.
         UserDefaults.standard.set(typeFilters[max(0, typeControl?.selectedSegment ?? 0)],
                                   forKey: "ClipKeepTypeFilter")
+        refreshList()
+    }
+
+    @objc func sortChanged() {
+        UserDefaults.standard.set(sortPopup.selectedItem?.representedObject as? String ?? "recency",
+                                  forKey: "ClipKeepColorSort")
         refreshList()
     }
 
@@ -1454,6 +1539,27 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
     // The clips currently visible, in display order (pinned first in
     // the unfiltered view). Quick-paste numbers follow this order.
+    // Sort key for the Colours tab's hue ordering: chromatic
+    // colours first, ordered by hue; greys (and near-greys) last,
+    // lightest first.
+    func hueSortKey(_ item: ClipItem) -> (grey: Bool, hue: Double, light: Double) {
+        guard let hex = item.text, let c = colorFromHex(hex)?.usingColorSpace(.sRGB) else {
+            return (true, 0, 0)
+        }
+        let r = Double(c.redComponent), g = Double(c.greenComponent), b = Double(c.blueComponent)
+        let maxV = max(r, g, b), minV = min(r, g, b)
+        let l = (maxV + minV) / 2
+        if maxV == minV { return (true, 0, l) }
+        let d = maxV - minV
+        let s = l > 0.5 ? d / (2 - maxV - minV) : d / (maxV + minV)
+        if s < 0.08 { return (true, 0, l) }
+        var h: Double
+        if maxV == r { h = (g - b) / d + (g < b ? 6 : 0) }
+        else if maxV == g { h = (b - r) / d + 2 }
+        else { h = (r - g) / d + 4 }
+        return (false, h * 60, l)
+    }
+
     func visibleItems() -> [ClipItem] {
         let q = (searchField?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let type = typeFilters[max(0, typeControl?.selectedSegment ?? 0)]
@@ -1477,6 +1583,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             }
             return true
         }
+        if type == "color",
+           UserDefaults.standard.string(forKey: "ClipKeepColorSort") == "hue" {
+            result = result.sorted { a, b in
+                let ka = hueSortKey(a), kb = hueSortKey(b)
+                if ka.grey != kb.grey { return !ka.grey && kb.grey }
+                if ka.hue != kb.hue { return ka.hue < kb.hue }
+                return ka.light > kb.light
+            }
+        }
         if board == nil {
             let pinned = result.filter { $0.pinned }
             let rest = result.filter { !$0.pinned }
@@ -1494,6 +1609,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         stackBar.isHidden = stackIDs.isEmpty
         if !stackIDs.isEmpty {
             stackLabel.stringValue = "Paste Stack: \(stackIDs.count) queued — ⌃⌥⌘V pastes the next one"
+        }
+        // The hue-sort popup only exists on the Colours tab.
+        if sortPopup != nil {
+            sortPopup.isHidden = typeFilters[max(0, typeControl?.selectedSegment ?? 0)] != "color"
         }
 
         for view in listStack.arrangedSubviews { listStack.removeArrangedSubview(view); view.removeFromSuperview() }
@@ -2176,6 +2295,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         limitItem.submenu = limitMenu
         menu.addItem(limitItem)
         add("Excluded Apps…", #selector(showExclusions))
+        add("Reset Panel Size", #selector(resetPanelSize))
         add("Clear History", #selector(clearHistory))
         menu.addItem(.separator())
         add("Quit ClipKeep", #selector(quitApp))
@@ -2184,6 +2304,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
     @objc func quitApp() {
         NSApp.terminate(nil)
+    }
+
+    @objc func resetPanelSize() {
+        // Drop the saved frame and re-apply the default, so a
+        // stuck or stale size is always one click from fixed.
+        UserDefaults.standard.removeObject(forKey: panelFrameKey)
+        restorePanelFrame()
     }
 
     // MARK: Excluded apps
@@ -2363,8 +2490,27 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     func installKeyMonitor() {
         let digitCodes: [UInt16: Int] = [18: 1, 19: 2, 20: 3, 21: 4, 23: 5, 22: 6, 26: 7, 28: 8, 25: 9]
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self, self.panel.isVisible, self.panel.isKeyWindow,
-                  event.modifierFlags.contains(.command),
+            guard let self, self.panel.isVisible, self.panel.isKeyWindow else { return event }
+            let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            // Esc: clear a non-empty search first; only an Esc
+            // with an already-empty search closes the panel.
+            if event.keyCode == 53, mods.isEmpty {
+                if !(self.searchField?.stringValue ?? "").isEmpty {
+                    self.searchField.stringValue = ""
+                    self.refreshList()
+                } else {
+                    self.panel.orderOut(nil)
+                }
+                return nil
+            }
+            // ⌘F jumps to the search field.
+            if mods.contains(.command), !mods.contains(.shift),
+               !mods.contains(.control), !mods.contains(.option),
+               event.keyCode == 3 {
+                self.panel.makeFirstResponder(self.searchField)
+                return nil
+            }
+            guard mods.contains(.command),
                   let n = digitCodes[event.keyCode] else { return event }
             let items = self.visibleItems()
             guard items.count >= n else { return event }
