@@ -736,6 +736,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     var emptyLabel: NSTextField!
     var exclusionsWindow: NSWindow?
     var exclusionsStack: NSStackView?
+    var settingsWindow: NSWindow?
+    var settingsPauseCheckbox: NSButton?
+    var settingsLimitPopup: NSPopUpButton?
+    var settingsThemePopup: NSPopUpButton?
+    var settingsRTCheckbox: NSButton?
+    var settingsUpdateStatus: NSTextField?
+    var settingsExclusionsStack: NSStackView?
 
     var timer: Timer?
     var lastChangeCount = 0
@@ -1222,6 +1229,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                     if manual { self.flashUpToDateStrip() }
                 }
                 self.refreshUpdateStrip()
+                self.refreshSettingsUpdateStatus()
             }
         }.resume()
     }
@@ -2175,7 +2183,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     func windowDidResignKey(_ notification: Notification) {
         guard let w = notification.object as? NSWindow, w === panel, panel.isVisible else { return }
         if NSApp.modalWindow != nil { return }
-        if let key = NSApp.keyWindow, (key === previewWindow || key === exclusionsWindow) { return }
+        if let key = NSApp.keyWindow, (key === previewWindow || key === exclusionsWindow || key === settingsWindow) { return }
         panel.orderOut(nil)
     }
 
@@ -3087,6 +3095,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         }
         add(capturePaused ? "Resume Capture" : "Pause Capture", #selector(togglePause))
         add("Check for Updates…", #selector(checkForUpdateClicked))
+        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
         menu.addItem(.separator())
         let limitItem = NSMenuItem(title: "History Limit", action: nil, keyEquivalent: "")
         let limitMenu = NSMenu()
@@ -3243,12 +3254,257 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         }
         store.excludedApps = excluded
         refreshExclusionsList()
+        refreshSettingsExclusionsList()
     }
 
     @objc func removeExcludedApp(_ sender: NSButton) {
         guard let bundleID = sender.identifier?.rawValue else { return }
         store.excludedApps = store.excludedApps.filter { $0 != bundleID }
         refreshExclusionsList()
+        refreshSettingsExclusionsList()
+    }
+
+    // MARK: Settings
+
+    // One Settings window (roadmap #14, v2.7.0) gathering what
+    // used to live only in the ••• menu: General (pause, history
+    // limit, panel size, clear history), Appearance (theme,
+    // Reduce Transparency), Updates (version, check now, status),
+    // and Excluded Apps (the same list the standalone window
+    // edits — both views write the one store list). Every control
+    // calls the existing actions/keys, so the menus and Settings
+    // can never disagree. Modelled on StayAwake's tabbed
+    // Settings, which Femi approved Nov 15. Fixed size, not
+    // persisted — same trade-off as the other auxiliary windows.
+    @objc func showSettings() {
+        if settingsWindow == nil { buildSettingsWindow() }
+        syncSettingsControls()
+        settingsWindow?.center()
+        settingsWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func settingsStack(in view: NSView) -> NSStackView {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 10
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 16),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -16)
+        ])
+        return stack
+    }
+
+    private func buildSettingsWindow() {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 380),
+                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.title = "ClipKeep Settings"
+        window.isReleasedWhenClosed = false
+        let tabs = NSTabView()
+        window.contentView = tabs
+
+        // General
+        let general = NSView()
+        let g = settingsStack(in: general)
+        let pause = NSButton(checkboxWithTitle: "Pause capture (stop recording new copies)", target: self, action: #selector(settingsPauseToggled(_:)))
+        settingsPauseCheckbox = pause
+        g.addArrangedSubview(pause)
+        let limitRow = NSStackView()
+        limitRow.orientation = .horizontal
+        limitRow.spacing = 8
+        limitRow.addArrangedSubview(NSTextField(labelWithString: "History limit:"))
+        let limitPopup = NSPopUpButton()
+        limitPopup.addItems(withTitles: ["200 clips", "500 clips", "1000 clips", "No limit"])
+        for (i, value) in [200, 500, 1000, 0].enumerated() {
+            limitPopup.item(at: i)?.representedObject = value
+        }
+        limitPopup.target = self
+        limitPopup.action = #selector(settingsLimitChanged(_:))
+        settingsLimitPopup = limitPopup
+        limitRow.addArrangedSubview(limitPopup)
+        g.addArrangedSubview(limitRow)
+        let reset = NSButton(title: "Reset Panel Size", target: self, action: #selector(resetPanelSize))
+        reset.bezelStyle = .rounded
+        g.addArrangedSubview(reset)
+        let clear = NSButton(title: "Clear History", target: self, action: #selector(clearHistory))
+        clear.bezelStyle = .rounded
+        g.addArrangedSubview(clear)
+        let gItem = NSTabViewItem()
+        gItem.label = "General"
+        gItem.view = general
+        tabs.addTabViewItem(gItem)
+
+        // Appearance
+        let appearance = NSView()
+        let a = settingsStack(in: appearance)
+        a.addArrangedSubview(NSTextField(labelWithString: "Panel theme:"))
+        let themePopup = NSPopUpButton()
+        themePopup.addItems(withTitles: panelThemes.map { $0.name })
+        for (i, theme) in panelThemes.enumerated() {
+            themePopup.item(at: i)?.representedObject = theme.id
+        }
+        themePopup.target = self
+        themePopup.action = #selector(settingsThemeChanged(_:))
+        settingsThemePopup = themePopup
+        a.addArrangedSubview(themePopup)
+        let rt = NSButton(checkboxWithTitle: "Reduce Transparency (solid panel background)", target: self, action: #selector(settingsRTToggled(_:)))
+        settingsRTCheckbox = rt
+        a.addArrangedSubview(rt)
+        let aItem = NSTabViewItem()
+        aItem.label = "Appearance"
+        aItem.view = appearance
+        tabs.addTabViewItem(aItem)
+
+        // Updates
+        let updates = NSView()
+        let u = settingsStack(in: updates)
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+        let versionLabel = NSTextField(labelWithString: "ClipKeep v\(version)")
+        versionLabel.font = NSFont.boldSystemFont(ofSize: 13)
+        u.addArrangedSubview(versionLabel)
+        let status = NSTextField(wrappingLabelWithString: "")
+        status.preferredMaxLayoutWidth = 440
+        settingsUpdateStatus = status
+        u.addArrangedSubview(status)
+        let check = NSButton(title: "Check for Updates…", target: self, action: #selector(checkForUpdateClicked))
+        check.bezelStyle = .rounded
+        u.addArrangedSubview(check)
+        let note = NSTextField(wrappingLabelWithString: "Updates are checked against a small public version feed. Since v2.6.1, downloads are verified against the feed's SHA-256 checksum before installing.")
+        note.font = NSFont.systemFont(ofSize: 11)
+        note.textColor = .secondaryLabelColor
+        note.preferredMaxLayoutWidth = 440
+        u.addArrangedSubview(note)
+        let uItem = NSTabViewItem()
+        uItem.label = "Updates"
+        uItem.view = updates
+        tabs.addTabViewItem(uItem)
+
+        // Excluded Apps — same list layout as the standalone window.
+        let excluded = NSView()
+        let eStack = NSStackView()
+        eStack.orientation = .vertical
+        eStack.alignment = .leading
+        eStack.spacing = 6
+        eStack.translatesAutoresizingMaskIntoConstraints = false
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        let clipView = NSView()
+        clipView.addSubview(eStack)
+        scroll.documentView = clipView
+        NSLayoutConstraint.activate([
+            eStack.leadingAnchor.constraint(equalTo: clipView.leadingAnchor, constant: 8),
+            eStack.trailingAnchor.constraint(equalTo: clipView.trailingAnchor, constant: -8),
+            eStack.topAnchor.constraint(equalTo: clipView.topAnchor, constant: 8),
+            eStack.bottomAnchor.constraint(lessThanOrEqualTo: clipView.bottomAnchor, constant: -8),
+            clipView.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor)
+        ])
+        excluded.addSubview(scroll)
+        let addButton = NSButton(title: "Add app…", target: self, action: #selector(addExcludedApp))
+        addButton.bezelStyle = .rounded
+        addButton.translatesAutoresizingMaskIntoConstraints = false
+        excluded.addSubview(addButton)
+        let eNote = NSTextField(labelWithString: "Copies from these apps are never recorded.")
+        eNote.font = NSFont.systemFont(ofSize: 11)
+        eNote.textColor = .secondaryLabelColor
+        eNote.translatesAutoresizingMaskIntoConstraints = false
+        excluded.addSubview(eNote)
+        NSLayoutConstraint.activate([
+            scroll.topAnchor.constraint(equalTo: excluded.topAnchor, constant: 10),
+            scroll.leadingAnchor.constraint(equalTo: excluded.leadingAnchor, constant: 10),
+            scroll.trailingAnchor.constraint(equalTo: excluded.trailingAnchor, constant: -10),
+            scroll.bottomAnchor.constraint(equalTo: addButton.topAnchor, constant: -8),
+            addButton.leadingAnchor.constraint(equalTo: excluded.leadingAnchor, constant: 10),
+            addButton.bottomAnchor.constraint(equalTo: excluded.bottomAnchor, constant: -10),
+            eNote.leadingAnchor.constraint(equalTo: addButton.trailingAnchor, constant: 10),
+            eNote.centerYAnchor.constraint(equalTo: addButton.centerYAnchor),
+            eNote.trailingAnchor.constraint(lessThanOrEqualTo: excluded.trailingAnchor, constant: -10)
+        ])
+        settingsExclusionsStack = eStack
+        let eItem = NSTabViewItem()
+        eItem.label = "Excluded Apps"
+        eItem.view = excluded
+        tabs.addTabViewItem(eItem)
+
+        settingsWindow = window
+    }
+
+    func syncSettingsControls() {
+        settingsPauseCheckbox?.state = capturePaused ? .on : .off
+        if let popup = settingsLimitPopup {
+            for i in 0..<popup.numberOfItems where (popup.item(at: i)?.representedObject as? Int) == store.historyLimit {
+                popup.selectItem(at: i)
+            }
+        }
+        if let popup = settingsThemePopup {
+            for i in 0..<popup.numberOfItems where (popup.item(at: i)?.representedObject as? String) == currentTheme.id {
+                popup.selectItem(at: i)
+            }
+        }
+        settingsRTCheckbox?.state = UserDefaults.standard.bool(forKey: "ClipKeepReduceTransparency") ? .on : .off
+        refreshSettingsUpdateStatus()
+        refreshSettingsExclusionsList()
+    }
+
+    func refreshSettingsUpdateStatus() {
+        guard let label = settingsUpdateStatus else { return }
+        if let upd = availableUpdate {
+            label.stringValue = "ClipKeep \(upd.version) is available — open the panel and use Install in the update strip."
+        } else if Date() < updateSnoozedUntil {
+            let f = DateFormatter()
+            f.dateStyle = .medium
+            f.timeStyle = .short
+            label.stringValue = "Update notices are snoozed until \(f.string(from: updateSnoozedUntil))."
+        } else {
+            label.stringValue = "No update is waiting. ClipKeep checks at launch; you can check again any time."
+        }
+    }
+
+    func refreshSettingsExclusionsList() {
+        guard let stack = settingsExclusionsStack else { return }
+        for view in stack.arrangedSubviews { stack.removeArrangedSubview(view); view.removeFromSuperview() }
+        if store.excludedApps.isEmpty {
+            let label = NSTextField(labelWithString: "No apps excluded yet.")
+            label.textColor = .secondaryLabelColor
+            stack.addArrangedSubview(label)
+        }
+        for bundleID in store.excludedApps {
+            let row = NSStackView()
+            row.orientation = .horizontal
+            row.spacing = 8
+            let label = NSTextField(labelWithString: appName(forBundleID: bundleID))
+            let remove = NSButton(title: "Remove", target: self, action: #selector(removeExcludedApp(_:)))
+            remove.bezelStyle = .rounded
+            remove.controlSize = .small
+            remove.identifier = NSUserInterfaceItemIdentifier(bundleID)
+            row.addArrangedSubview(label)
+            row.addArrangedSubview(remove)
+            stack.addArrangedSubview(row)
+        }
+    }
+
+    @objc func settingsPauseToggled(_ sender: NSButton) {
+        if (sender.state == .on) != capturePaused { togglePause() }
+        sender.state = capturePaused ? .on : .off
+    }
+
+    @objc func settingsLimitChanged(_ sender: NSPopUpButton) {
+        if let mi = sender.selectedItem { limitChosen(mi) }
+    }
+
+    @objc func settingsThemeChanged(_ sender: NSPopUpButton) {
+        if let mi = sender.selectedItem { themeChosen(mi) }
+    }
+
+    @objc func settingsRTToggled(_ sender: NSButton) {
+        let key = "ClipKeepReduceTransparency"
+        if (sender.state == .on) != UserDefaults.standard.bool(forKey: key) { toggleReduceTransparency() }
+        sender.state = UserDefaults.standard.bool(forKey: key) ? .on : .off
     }
 
     // MARK: Panel toggle + hotkeys
@@ -3275,6 +3531,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         add("Open ClipKeep", #selector(openPanel))
         add(capturePaused ? "Resume Capture" : "Pause Capture", #selector(togglePause))
         add("Check for Updates…", #selector(checkForUpdateClicked))
+        add("Settings…", #selector(showSettings))
         menu.addItem(.separator())
         add("Quit ClipKeep", #selector(quitApp))
         NSMenu.popUpContextMenu(menu, with: event, for: button)
