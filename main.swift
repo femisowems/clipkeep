@@ -200,6 +200,282 @@ final class ClickView: NSView {
     }
 }
 
+// MARK: Button overhaul (v2.4.0)
+//
+// One button system across the panel, replacing the stock
+// controls Femi circled in his Nov 17 Loom ("Improve the buttons
+// entirely!!"): pill tabs with icons + counts and a sliding
+// selection, every dropdown in the same toolbar chrome, icon
+// actions on cards, and real hover / pressed / focus states.
+
+// A borderless NSButton whose layer paints its own background
+// for the resting / hover / pressed states. Subclasses and
+// callers set the palette; tracking areas drive the hover.
+class HoverButton: NSButton {
+    var normalBG: NSColor = .clear { didSet { refreshChrome() } }
+    var hoverBG: NSColor = NSColor(white: 0, alpha: 0.06) { didSet { refreshChrome() } }
+    var pressedBG: NSColor = NSColor(white: 0, alpha: 0.12) { didSet { refreshChrome() } }
+    var baseTint: NSColor? { didSet { refreshChrome() } }
+    var hoverTint: NSColor?
+    var chromeCornerRadius: CGFloat = 7 { didSet { refreshChrome() } }
+    var chromeBorderColor: NSColor? { didSet { refreshChrome() } }
+    private var hovering = false
+    private var pressing = false
+    private var hoverArea: NSTrackingArea?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        isBordered = false
+        bezelStyle = .inline
+        refreshChrome()
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        let area = NSTrackingArea(rect: bounds,
+                                  options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        hoverArea = area
+    }
+    override func mouseEntered(with event: NSEvent) { hovering = true; refreshChrome() }
+    override func mouseExited(with event: NSEvent) { hovering = false; refreshChrome() }
+    override func mouseDown(with event: NSEvent) {
+        pressing = true; refreshChrome()
+        super.mouseDown(with: event)
+        pressing = false; refreshChrome()
+    }
+    func refreshChrome() {
+        layer?.backgroundColor = (pressing ? pressedBG : hovering ? hoverBG : normalBG).cgColor
+        layer?.cornerRadius = chromeCornerRadius
+        if let chromeBorderColor {
+            layer?.borderWidth = 1
+            layer?.borderColor = chromeBorderColor.cgColor
+        } else {
+            layer?.borderWidth = 0
+        }
+        if hovering, let hoverTint {
+            contentTintColor = hoverTint
+        } else if let baseTint {
+            contentTintColor = baseTint
+        }
+    }
+}
+
+// Stack view that never intercepts clicks — used inside pill
+// tab buttons so every click lands on the button itself.
+final class PassthroughStackView: NSStackView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+// One tab in the pill row: SF Symbol icon + title + count
+// badge. The selection fill lives on the track's sliding
+// indicator; the pill only recolours its content and paints
+// its own hover wash.
+final class PillTabButton: HoverButton {
+    let typeValue: String
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let iconView = NSImageView()
+    private let badgeView = NSView()
+    private let badgeLabel = NSTextField(labelWithString: "")
+    private(set) var isCurrent = false
+
+    init(type: String, title: String, symbol: String) {
+        typeValue = type
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        chromeCornerRadius = 13
+        hoverBG = NSColor(white: 0, alpha: 0.07)
+
+        let stack = PassthroughStackView()
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 6
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+
+        if let img = NSImage(systemSymbolName: symbol, accessibilityDescription: title) {
+            iconView.image = img.withSymbolConfiguration(
+                NSImage.SymbolConfiguration(pointSize: 12, weight: .medium))
+        }
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        stack.addArrangedSubview(iconView)
+
+        titleLabel.stringValue = title
+        titleLabel.font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
+        stack.addArrangedSubview(titleLabel)
+
+        badgeView.wantsLayer = true
+        badgeView.layer?.cornerRadius = 7
+        badgeView.translatesAutoresizingMaskIntoConstraints = false
+        badgeLabel.font = NSFont.systemFont(ofSize: 10.5, weight: .semibold)
+        badgeLabel.translatesAutoresizingMaskIntoConstraints = false
+        badgeView.addSubview(badgeLabel)
+        stack.addArrangedSubview(badgeView)
+
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 11),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -11),
+            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            heightAnchor.constraint(equalToConstant: 26),
+            badgeLabel.leadingAnchor.constraint(equalTo: badgeView.leadingAnchor, constant: 5),
+            badgeLabel.trailingAnchor.constraint(equalTo: badgeView.trailingAnchor, constant: -5),
+            badgeLabel.topAnchor.constraint(equalTo: badgeView.topAnchor, constant: 1),
+            badgeLabel.bottomAnchor.constraint(equalTo: badgeView.bottomAnchor, constant: -1)
+        ])
+        setCurrent(false)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func setCount(_ n: Int) { badgeLabel.stringValue = "\(n)" }
+
+    func setCurrent(_ on: Bool) {
+        isCurrent = on
+        let fg: NSColor = on ? .white : .labelColor
+        titleLabel.textColor = fg
+        iconView.contentTintColor = fg
+        badgeLabel.textColor = on ? .white : .secondaryLabelColor
+        badgeView.layer?.backgroundColor = (on ? NSColor.white.withAlphaComponent(0.30)
+                                              : NSColor(white: 0, alpha: 0.10)).cgColor
+        hoverBG = on ? .clear : NSColor(white: 0, alpha: 0.07)
+    }
+}
+
+// The pill tab row: a rounded track holding the pills, with an
+// accent indicator that slides under the selected pill.
+final class PillTabsView: NSView {
+    var onChange: (() -> Void)?
+    private(set) var selectedType = "all"
+    private let indicator = NSView()
+    private let stack = NSStackView()
+    private var pills: [PillTabButton] = []
+
+    init(types: [(type: String, title: String, symbol: String)]) {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        layer?.backgroundColor = NSColor(white: 0, alpha: 0.06).cgColor
+        layer?.cornerRadius = 16
+
+        indicator.wantsLayer = true
+        indicator.layer?.backgroundColor = NSColor.systemBlue.cgColor
+        indicator.layer?.cornerRadius = 13
+        indicator.layer?.shadowColor = NSColor.systemBlue.cgColor
+        indicator.layer?.shadowOpacity = 0.35
+        indicator.layer?.shadowRadius = 4
+        indicator.layer?.shadowOffset = NSSize(width: 0, height: -1)
+        addSubview(indicator)
+
+        stack.orientation = .horizontal
+        stack.spacing = 2
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 3),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -3),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 3),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -3),
+            heightAnchor.constraint(equalToConstant: 32)
+        ])
+        for entry in types {
+            let pill = PillTabButton(type: entry.type, title: entry.title, symbol: entry.symbol)
+            pill.target = self
+            pill.action = #selector(pillClicked(_:))
+            pills.append(pill)
+            stack.addArrangedSubview(pill)
+        }
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    @objc private func pillClicked(_ sender: PillTabButton) {
+        guard sender.typeValue != selectedType else { return }
+        select(type: sender.typeValue, animate: true)
+        onChange?()
+    }
+
+    func select(type: String, animate: Bool) {
+        guard pills.contains(where: { $0.typeValue == type }) else { return }
+        selectedType = type
+        for pill in pills { pill.setCurrent(pill.typeValue == type) }
+        positionIndicator(animated: animate)
+    }
+
+    func setCounts(_ counts: [String: Int]) {
+        for pill in pills { pill.setCount(counts[pill.typeValue] ?? 0) }
+    }
+
+    override func layout() {
+        super.layout()
+        positionIndicator(animated: false)
+    }
+
+    private func positionIndicator(animated: Bool) {
+        guard let pill = pills.first(where: { $0.typeValue == selectedType }) else { return }
+        let frame = pill.convert(pill.bounds, to: self)
+        guard frame.width > 0 else { return }
+        if animated {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.18
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                indicator.animator().frame = frame
+            }
+        } else {
+            indicator.frame = frame
+        }
+    }
+}
+
+// The toolbar chrome shared by every filter dropdown: a
+// rounded, bordered ghost button the borderless popup sits
+// inside, so boards / apps / recency / sort all read as one
+// system of identical buttons.
+final class ToolbarShell: NSView {
+    private var hovering = false
+    private var hoverArea: NSTrackingArea?
+
+    init(popup: NSPopUpButton) {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        layer?.cornerRadius = 8
+        layer?.borderWidth = 1
+        layer?.borderColor = NSColor(white: 0, alpha: 0.10).cgColor
+        applyHover()
+        popup.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(popup)
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 28),
+            popup.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 9),
+            popup.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -5),
+            popup.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        let area = NSTrackingArea(rect: bounds,
+                                  options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        hoverArea = area
+    }
+    override func mouseEntered(with event: NSEvent) { hovering = true; applyHover() }
+    override func mouseExited(with event: NSEvent) { hovering = false; applyHover() }
+    private func applyHover() {
+        layer?.backgroundColor = (hovering ? NSColor(white: 1, alpha: 0.82)
+                                           : NSColor(white: 1, alpha: 0.55)).cgColor
+        layer?.shadowColor = NSColor.black.cgColor
+        layer?.shadowOpacity = hovering ? 0.12 : 0
+        layer?.shadowRadius = 4
+        layer?.shadowOffset = NSSize(width: 0, height: -1)
+    }
+}
+
 // Cheap FNV-1a hash, used to dedupe identical images.
 func fnvHash(_ data: Data) -> String {
     var hash: UInt64 = 14695981039346656037
@@ -330,11 +606,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     var statusItem: NSStatusItem!
     var panel: NSWindow!
     var searchField: NSSearchField!
-    var typeControl: NSSegmentedControl!
+    var pillTabs: PillTabsView!
     var boardPopup: NSPopUpButton!
     var appPopup: NSPopUpButton!
     var recencyPopup: NSPopUpButton!
     var sortPopup: NSPopUpButton!
+    var sortShell: ToolbarShell!
     var copiedPill: NSTextField!
     var stackBar: NSStackView!
     var stackLabel: NSTextField!
@@ -353,9 +630,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     var stackIDs: [String] = []   // Paste Stack queue, first = next out
     var keyMonitor: Any?
 
-    // Segment order matches typeControl's labels. "link" is not a
+    // Pill-tab order matches typeFilters. "link" is not a
     // stored kind — link clips are text clips whose text is a URL;
-    // the Text segment excludes them so the two stay separate.
+    // the Text tab excludes them so the two stay separate.
     let typeFilters = ["all", "text", "link", "image", "file", "color"]
 
     // MARK: Lifecycle
@@ -1153,34 +1430,45 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         searchField.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(searchField)
 
-        typeControl = NSSegmentedControl(labels: ["All", "Text", "Links", "Images", "Files", "Colours"],
-                                         trackingMode: .selectOne, target: self, action: #selector(filterChanged))
+        // Pill tabs (v2.4.0 button overhaul): SF Symbol icon +
+        // title + live count per type, accent indicator sliding
+        // under the selection. Replaces the segmented control.
+        pillTabs = PillTabsView(types: [
+            (type: "all", title: "All", symbol: "square.grid.2x2"),
+            (type: "text", title: "Text", symbol: "text.alignleft"),
+            (type: "link", title: "Links", symbol: "link"),
+            (type: "image", title: "Images", symbol: "photo"),
+            (type: "file", title: "Files", symbol: "doc"),
+            (type: "color", title: "Colours", symbol: "paintpalette")
+        ])
+        pillTabs.onChange = { [weak self] in self?.filterChanged() }
         // Reopen on the tab used last time (remembered across
         // relaunches); All on first run.
-        if let saved = UserDefaults.standard.string(forKey: "ClipKeepTypeFilter"),
-           let idx = typeFilters.firstIndex(of: saved) {
-            typeControl.selectedSegment = idx
-        } else {
-            typeControl.selectedSegment = 0
-        }
-        typeControl.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(typeControl)
+        let savedType = UserDefaults.standard.string(forKey: "ClipKeepTypeFilter") ?? "all"
+        pillTabs.select(type: typeFilters.contains(savedType) ? savedType : "all", animate: false)
+        content.addSubview(pillTabs)
 
+        // The filter dropdowns sit borderless inside matching
+        // ToolbarShells — one button system (v2.4.0).
         boardPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        boardPopup.isBordered = false
+        boardPopup.font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
         boardPopup.target = self
         boardPopup.action = #selector(filterChanged)
-        boardPopup.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(boardPopup)
+        let boardShell = ToolbarShell(popup: boardPopup)
+        content.addSubview(boardShell)
 
         appPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-        appPopup.controlSize = .small
+        appPopup.isBordered = false
+        appPopup.font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
         appPopup.target = self
         appPopup.action = #selector(filterChanged)
-        appPopup.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(appPopup)
+        let appShell = ToolbarShell(popup: appPopup)
+        content.addSubview(appShell)
 
         recencyPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-        recencyPopup.controlSize = .small
+        recencyPopup.isBordered = false
+        recencyPopup.font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
         for (title, days) in [("All time", 0), ("Today", -1), ("Last 7 days", 7), ("Last 30 days", 30)] {
             let mi = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             mi.representedObject = days
@@ -1188,13 +1476,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         }
         recencyPopup.target = self
         recencyPopup.action = #selector(filterChanged)
-        recencyPopup.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(recencyPopup)
+        let recencyShell = ToolbarShell(popup: recencyPopup)
+        content.addSubview(recencyShell)
 
         // Colours-only sort choice: recency (the default) or by
-        // hue. Hidden on every other tab — refreshList toggles it.
+        // hue. Hidden on every other tab — refreshList toggles
+        // its shell.
         sortPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-        sortPopup.controlSize = .small
+        sortPopup.isBordered = false
+        sortPopup.font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
         for (title, value) in [("Recent first", "recency"), ("Sort by hue", "hue")] {
             let mi = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             mi.representedObject = value
@@ -1205,15 +1495,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         }
         sortPopup.target = self
         sortPopup.action = #selector(sortChanged)
-        sortPopup.translatesAutoresizingMaskIntoConstraints = false
-        sortPopup.isHidden = true
-        content.addSubview(sortPopup)
+        sortShell = ToolbarShell(popup: sortPopup)
+        sortShell.isHidden = true
+        content.addSubview(sortShell)
 
-        // Second filter row: board / source app / recency / sort.
-        let filterBar = NSStackView(views: [boardPopup, appPopup, recencyPopup, sortPopup])
+        // Second filter row: board / source app / recency / sort,
+        // each in its toolbar shell.
+        let filterBar = NSStackView(views: [boardShell, appShell, recencyShell, sortShell])
         filterBar.orientation = .horizontal
         filterBar.spacing = 8
-        filterBar.heightAnchor.constraint(equalToConstant: 26).isActive = true
+        filterBar.heightAnchor.constraint(equalToConstant: 28).isActive = true
         filterBar.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(filterBar)
 
@@ -1292,9 +1583,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         // apps, clear, quit — plus the version) sits behind one
         // "•••" button beside the search field, leaving the panel
         // to the cards.
-        let overflowButton = NSButton(title: "•••", target: self, action: #selector(showOverflowMenu(_:)))
-        overflowButton.bezelStyle = .rounded
+        let overflowButton = HoverButton(frame: .zero)
+        overflowButton.title = "•••"
         overflowButton.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        overflowButton.target = self
+        overflowButton.action = #selector(showOverflowMenu(_:))
+        overflowButton.normalBG = NSColor(white: 1, alpha: 0.55)
+        overflowButton.hoverBG = NSColor(white: 1, alpha: 0.85)
+        overflowButton.pressedBG = NSColor(white: 0, alpha: 0.10)
+        overflowButton.chromeCornerRadius = 15
+        overflowButton.chromeBorderColor = NSColor(white: 0, alpha: 0.10)
         overflowButton.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(overflowButton)
 
@@ -1325,19 +1623,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
             overflowButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -10),
             overflowButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
-            overflowButton.widthAnchor.constraint(equalToConstant: 44),
+            overflowButton.widthAnchor.constraint(equalToConstant: 30),
+            overflowButton.heightAnchor.constraint(equalToConstant: 30),
 
             // The tab row and the filter row are centered as
             // groups (Femi's Nov 17 Loom: left-aligned, they sat
             // in the panel's left third with empty space to the
             // right). The leading floor keeps a narrow panel from
             // pushing them off the left edge.
-            typeControl.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 8),
-            typeControl.centerXAnchor.constraint(equalTo: content.centerXAnchor),
-            typeControl.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor, constant: 10),
-            typeControl.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -10),
+            pillTabs.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 8),
+            pillTabs.centerXAnchor.constraint(equalTo: content.centerXAnchor),
+            pillTabs.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor, constant: 10),
+            pillTabs.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -10),
 
-            filterBar.topAnchor.constraint(equalTo: typeControl.bottomAnchor, constant: 8),
+            filterBar.topAnchor.constraint(equalTo: pillTabs.bottomAnchor, constant: 8),
             filterBar.centerXAnchor.constraint(equalTo: content.centerXAnchor),
             filterBar.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor, constant: 10),
             filterBar.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -10),
@@ -1454,7 +1753,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         // Remember the type tab across relaunches. The board/app
         // popups share this action; re-writing the current tab
         // when they change is harmless.
-        UserDefaults.standard.set(typeFilters[max(0, typeControl?.selectedSegment ?? 0)],
+        UserDefaults.standard.set(pillTabs?.selectedType ?? "all",
                                   forKey: "ClipKeepTypeFilter")
         refreshList()
     }
@@ -1560,9 +1859,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         return (false, h * 60, l)
     }
 
+    // How many clips a type tab holds across the whole history
+    // (the pill badges; also the empty-state "in this tab" count).
+    func countForType(_ type: String) -> Int {
+        switch type {
+        case "link": return store.items.filter { isLinkItem($0) }.count
+        case "text": return store.items.filter { $0.kind == "text" && !isLinkItem($0) }.count
+        case "all": return store.items.count
+        default: return store.items.filter { $0.kind == type }.count
+        }
+    }
+
     func visibleItems() -> [ClipItem] {
         let q = (searchField?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let type = typeFilters[max(0, typeControl?.selectedSegment ?? 0)]
+        let type = pillTabs?.selectedType ?? "all"
         let board = boardFilter
         var result = store.items.filter { item in
             if type == "link" {
@@ -1611,8 +1921,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             stackLabel.stringValue = "Paste Stack: \(stackIDs.count) queued — ⌃⌥⌘V pastes the next one"
         }
         // The hue-sort popup only exists on the Colours tab.
-        if sortPopup != nil {
-            sortPopup.isHidden = typeFilters[max(0, typeControl?.selectedSegment ?? 0)] != "color"
+        if sortShell != nil {
+            sortShell.isHidden = (pillTabs?.selectedType ?? "all") != "color"
+        }
+        // Live counts on the pill badges.
+        if pillTabs != nil {
+            var counts: [String: Int] = [:]
+            for t in typeFilters { counts[t] = countForType(t) }
+            pillTabs.setCounts(counts)
         }
 
         for view in listStack.arrangedSubviews { listStack.removeArrangedSubview(view); view.removeFromSuperview() }
@@ -1636,14 +1952,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             } else {
                 // If the current tab has never held a clip, say so
                 // in the tab's own terms instead of blaming filters.
-                let type = typeFilters[max(0, typeControl?.selectedSegment ?? 0)]
-                let inTab: Int
-                switch type {
-                case "link": inTab = store.items.filter { isLinkItem($0) }.count
-                case "text": inTab = store.items.filter { $0.kind == "text" && !isLinkItem($0) }.count
-                case "all": inTab = store.items.count
-                default: inTab = store.items.filter { $0.kind == type }.count
-                }
+                let type = pillTabs?.selectedType ?? "all"
+                let inTab = countForType(type)
                 let tabHints = ["text": "No text clips yet — copy some text and it will show up here.",
                                 "link": "No links yet — copy a URL and it will show up here.",
                                 "image": "No images yet — copy an image and it will show up here.",
@@ -1799,12 +2109,26 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         }
     }
 
-    func cardFooterButton(_ title: String, action: Selector, id: String, tip: String) -> NSButton {
-        let b = NSButton(title: title, target: self, action: action)
-        b.bezelStyle = .inline
-        b.isBordered = false
-        b.font = NSFont.systemFont(ofSize: 11, weight: .medium)
-        b.contentTintColor = .secondaryLabelColor
+    // Card footer actions are icon buttons (v2.4.0 button
+    // overhaul): pin, stack, delete as SF Symbols with hover
+    // washes. Delete is the danger variant — it washes red on
+    // hover so the destructive action reads as one; a pinned
+    // clip's pin stays accent-filled.
+    func cardIconButton(symbol: String, action: Selector, id: String, tip: String,
+                        danger: Bool = false, active: Bool = false) -> HoverButton {
+        let b = HoverButton(frame: .zero)
+        if let img = NSImage(systemSymbolName: symbol, accessibilityDescription: tip) {
+            b.image = img.withSymbolConfiguration(
+                NSImage.SymbolConfiguration(pointSize: 13, weight: .medium))
+        }
+        b.imagePosition = .imageOnly
+        b.target = self
+        b.action = action
+        b.baseTint = active ? .systemBlue : .secondaryLabelColor
+        if danger {
+            b.hoverTint = .systemRed
+            b.hoverBG = NSColor.systemRed.withAlphaComponent(0.12)
+        }
         b.toolTip = tip
         b.identifier = NSUserInterfaceItemIdentifier(id)
         b.translatesAutoresizingMaskIntoConstraints = false
@@ -2068,7 +2392,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         footer.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(footer)
 
-        let pin = cardFooterButton(item.pinned ? "Unpin" : "Pin", action: #selector(pinClicked(_:)), id: item.id, tip: item.pinned ? "Unpin" : "Pin")
+        let pin = cardIconButton(symbol: item.pinned ? "pin.fill" : "pin", action: #selector(pinClicked(_:)), id: item.id, tip: item.pinned ? "Unpin" : "Pin", active: item.pinned)
         footer.addSubview(pin)
 
         let boardButton = NSPopUpButton(frame: .zero, pullsDown: true)
@@ -2098,9 +2422,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         boardButton.menu?.addItem(newItem)
         footer.addSubview(boardButton)
 
-        let stack = cardFooterButton("+ Stack", action: #selector(stackClicked(_:)), id: item.id, tip: "Add to the Paste Stack")
+        let stack = cardIconButton(symbol: "square.stack.3d.up", action: #selector(stackClicked(_:)), id: item.id, tip: "Add to the Paste Stack")
         footer.addSubview(stack)
-        let del = cardFooterButton("Delete", action: #selector(deleteClicked(_:)), id: item.id, tip: "Delete this clip")
+        let del = cardIconButton(symbol: "trash", action: #selector(deleteClicked(_:)), id: item.id, tip: "Delete this clip", danger: true)
         footer.addSubview(del)
 
         let meta = NSTextField(labelWithString: footerText(for: item))
@@ -2160,12 +2484,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
             pin.leadingAnchor.constraint(equalTo: footer.leadingAnchor, constant: 10),
             pin.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
+            pin.widthAnchor.constraint(equalToConstant: 26),
+            pin.heightAnchor.constraint(equalToConstant: 26),
             boardButton.leadingAnchor.constraint(equalTo: pin.trailingAnchor, constant: 8),
             boardButton.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
             del.trailingAnchor.constraint(equalTo: footer.trailingAnchor, constant: -10),
             del.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
-            stack.trailingAnchor.constraint(equalTo: del.leadingAnchor, constant: -8),
+            del.widthAnchor.constraint(equalToConstant: 26),
+            del.heightAnchor.constraint(equalToConstant: 26),
+            stack.trailingAnchor.constraint(equalTo: del.leadingAnchor, constant: -4),
             stack.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
+            stack.widthAnchor.constraint(equalToConstant: 26),
+            stack.heightAnchor.constraint(equalToConstant: 26),
             meta.centerXAnchor.constraint(equalTo: footer.centerXAnchor),
             meta.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
             meta.leadingAnchor.constraint(greaterThanOrEqualTo: boardButton.trailingAnchor, constant: 8),
