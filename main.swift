@@ -257,7 +257,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     var stackIDs: [String] = []   // Paste Stack queue, first = next out
     var keyMonitor: Any?
 
-    let typeFilters = ["all", "text", "image", "file", "color"]
+    // Segment order matches typeControl's labels. "link" is not a
+    // stored kind — link clips are text clips whose text is a URL;
+    // the Text segment excludes them so the two stay separate.
+    let typeFilters = ["all", "text", "link", "image", "file", "color"]
 
     // MARK: Lifecycle
 
@@ -1012,7 +1015,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         searchField.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(searchField)
 
-        typeControl = NSSegmentedControl(labels: ["All", "Text", "Images", "Files", "Colours"],
+        typeControl = NSSegmentedControl(labels: ["All", "Text", "Links", "Images", "Files", "Colours"],
                                          trackingMode: .selectOne, target: self, action: #selector(filterChanged))
         typeControl.selectedSegment = 0
         typeControl.translatesAutoresizingMaskIntoConstraints = false
@@ -1102,9 +1105,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             // looked empty while the history on disk was full.
             listStack.bottomAnchor.constraint(equalTo: clipView.bottomAnchor, constant: -12),
             // Horizontal feed: the document view's WIDTH is driven
-            // by the cards laid out along it; its height fills the
-            // scroll viewport exactly.
-            clipView.heightAnchor.constraint(equalTo: scrollView.contentView.heightAnchor),
+            // by the cards laid out along it. Its HEIGHT comes from
+            // the tallest card, via the stack's top+bottom pins
+            // above — deliberately NOT pinned to the viewport. With
+            // the viewport pin, a tall panel left the card row
+            // sitting low under a large empty area (still visible
+            // in Femi's Nov 17 size Loom after v2.3.1). A flipped
+            // document view shorter than the viewport anchors to
+            // the top, so the cards hug the top and the frosted
+            // background shows beneath them.
             clipView.widthAnchor.constraint(greaterThanOrEqualTo: scrollView.contentView.widthAnchor)
         ])
 
@@ -1173,9 +1182,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
     // MARK: Panel frame persistence (manual, validated)
 
-    // V4: the horizontal-feed layout (v2.3.0) starts from a fresh
-    // wide, short default frame instead of the old tall one.
-    private let panelFrameKey = "ClipKeepPanelFrameV4"
+    // V5: Femi's Nov 17 Loom pick — the default is a bottom-anchored
+    // strip, full screen width and about half the screen height,
+    // not a window that opens nearly full-screen. New key so the
+    // stretched V4 frame saved earlier is retired.
+    private let panelFrameKey = "ClipKeepPanelFrameV5"
 
     private func panelFrameIsUsable(_ f: NSRect) -> Bool {
         guard f.width >= panel.minSize.width, f.height >= panel.minSize.height else { return false }
@@ -1190,8 +1201,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                 return
             }
         }
-        panel.setFrame(NSRect(x: 0, y: 0, width: 520, height: 680), display: false)
-        panel.center()
+        // Default: full visible width, 520 tall, sitting on the
+        // bottom of the main screen's visible frame (above the
+        // Dock) — the size Femi settled on in his Nov 17 Loom.
+        if let vf = NSScreen.main?.visibleFrame {
+            panel.setFrame(NSRect(x: vf.minX, y: vf.minY, width: vf.width, height: 520), display: false)
+        } else {
+            panel.setFrame(NSRect(x: 0, y: 0, width: 1100, height: 520), display: false)
+            panel.center()
+        }
     }
 
     private func savePanelFrame() {
@@ -1317,7 +1335,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         let type = typeFilters[max(0, typeControl?.selectedSegment ?? 0)]
         let board = boardFilter
         var result = store.items.filter { item in
-            if type != "all" && item.kind != type { return false }
+            if type == "link" {
+                if !isLinkItem(item) { return false }
+            } else if type == "text" {
+                if item.kind != "text" || isLinkItem(item) { return false }
+            } else if type != "all" && item.kind != type { return false }
             if let board {
                 if board == "__pinned" {
                     if !item.pinned { return false }
