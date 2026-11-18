@@ -2770,11 +2770,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         // carry preferredMaxLayoutWidth now (see rowView), which
         // keeps their fitting heights honest in the first place.
         row.heightAnchor.constraint(lessThanOrEqualToConstant: 312).isActive = true
-        // The current clip (⌘1) gets Paste's blue selection outline.
-        if index == 0 {
-            row.layer?.borderColor = NSColor.controlAccentColor.cgColor
-            row.layer?.borderWidth = 2.5
-        }
+        // Card borders are owned by applySelectionBorders —
+        // one outline, for the selection only (v2.13.0).
     }
 
     func sectionLabel(_ text: String) -> NSTextField {
@@ -4146,8 +4143,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     // MARK: Keyboard navigation (roadmap #2, v2.9.0)
     //
     // A selection rides the horizontal feed, drawn as the theme
-    // accent outline (the first card keeps its blue "current
-    // clip" outline unless it is also the selection). Keys are
+    // accent outline — the only outline in the feed (v2.13.0:
+    // the first card's separate "current clip" outline was
+    // retired; selection wins). Keys are
     // handled in the local monitor below, alongside the existing
     // Esc / ⌘F / ⌘1–9 handling: ↑/↓ always move the selection
     // (they mean nothing in a one-line search field), ←/→ and ⌫
@@ -4164,13 +4162,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
     func applySelectionBorders() {
         guard let stack = listStack else { return }
-        for (i, card) in stack.arrangedSubviews.enumerated() {
+        // One outline only (v2.13.0, Femi's call from his
+        // Nov 18 keyboard-nav Loom): the outline always means
+        // the selection. Until now the first card also kept a
+        // permanent blue "current clip" outline, so two
+        // near-identical outlines sat in the feed meaning
+        // different things. The current clip is identified by
+        // its position and its ⌘1 badge instead.
+        for card in stack.arrangedSubviews {
             guard let layer = card.layer else { continue }
             if card.identifier?.rawValue == selectedItemID {
                 layer.borderColor = currentTheme.accent.cgColor
-                layer.borderWidth = 2.5
-            } else if i == 0 {
-                layer.borderColor = NSColor.controlAccentColor.cgColor
                 layer.borderWidth = 2.5
             } else {
                 layer.borderColor = currentTheme.cardBorder.cgColor
