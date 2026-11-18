@@ -948,6 +948,23 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             self.scrollView.contentView.scroll(to: origin)
             self.scrollView.reflectScrolledClipView(self.scrollView.contentView)
         }
+
+        // Open the panel on launch (v2.14.0, Femi's Nov 18
+        // Loom): clicking ClipKeep in the Apps grid launched it
+        // into the menu bar only — from the desktop it looked
+        // like nothing had happened. Launching the app now
+        // shows the panel (and, on a fresh launch, the intro),
+        // which is what clicking an app icon promises.
+        openPanel()
+    }
+
+    // Clicking the app's icon (Apps grid, Finder, Dock) while
+    // it is already running lands here: an accessory app has
+    // no windows to restore, so without this the click did
+    // nothing at all — the other half of Femi's Loom.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        openPanel()
+        return true
     }
 
     // MARK: Clipboard watching
