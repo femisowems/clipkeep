@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/femisowems/keepsake/actions/workflows/build.yml"><img src="https://github.com/femisowems/keepsake/actions/workflows/build.yml/badge.svg" alt="Build status"></a>
-  <a href="https://github.com/femisowems/keepsake/releases"><img src="https://img.shields.io/badge/version-v2.14.0-e4572e" alt="Latest version"></a>
+  <a href="https://github.com/femisowems/keepsake/releases"><img src="https://img.shields.io/badge/version-v2.14.1-e4572e" alt="Latest version"></a>
 </p>
 
 ClipKeep is a tiny, free, open-source macOS menu bar app that remembers
@@ -23,7 +23,7 @@ copy never leaves your Mac.
 safekeeping. The app itself is called ClipKeep.)*
 
 > 🚧 **Work in progress** — ClipKeep is under active development
-> (current release: **v2.14.0**). Features, behaviour and this README
+> (current release: **v2.14.1**). Features, behaviour and this README
 > may change between versions, and things may break.
 
 ---
@@ -71,7 +71,8 @@ holds whatever you copy.*
   filters the list to one board at a time.
 - **Paste back, three ways**
   - Double-click any clip to copy it back to the clipboard — the
-    panel stays open. (A single click just selects it.) To paste
+    panel closes once the copy lands. (A single click just
+    selects it.) To paste
     a clip straight into the app underneath instead, use
     **⌘1–⌘9**, Enter, or the card's paste button — with
     Accessibility permission, ClipKeep presses ⌘V for you so it
@@ -165,7 +166,7 @@ Download button and replace the app manually one last time.
 | Action | What it does |
 | --- | --- |
 | **⌘⇧V** or click the menu-bar icon | Show / hide the panel |
-| **Double-click a clip** | Copy it back to the clipboard (panel stays open); a single click selects |
+| **Double-click a clip** | Copy it back to the clipboard (panel closes once the copy lands); a single click selects |
 | **⌘1–⌘9** (panel open) | Quick-paste that numbered clip |
 | **↑ / ↓ / ← / →** (panel open) | Move the selection (←/→ while the search is empty) |
 | **Enter** (panel open) | Paste the selected clip |

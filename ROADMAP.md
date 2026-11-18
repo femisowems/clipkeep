@@ -77,7 +77,7 @@ Everything below shipped but has never been confirmed live. One pass (~10 minute
 2. Hide the panel and reopen with ⌘⇧V → no intro the second time; reopening is instant.
 
 **Clicking & pasting (v2.12.0–v2.14.0)**
-3. Single-click a card → it only selects (one outline, on that card). Double-click → it copies, the panel stays open, and the card chip + menu bar read "✓ Copied". Enter (or ⌘1) on the selected card → it pastes, fast (~¼ second), chip reads "✓ Pasted".
+3. Single-click a card → it only selects (one outline, on that card). Double-click → it copies, the card chip + menu bar read "✓ Copied", and the panel closes after a short beat (~half a second). Enter (or ⌘1) on the selected card → it pastes, fast (~¼ second), chip reads "✓ Pasted".
 4. Settings → General → "Paste on single click" ON → a single click pastes. Turn it back OFF (or leave it how you like it — it's a preference now).
 
 **Flashes (v2.5.2, repaired v2.14.0)**

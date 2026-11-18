@@ -1144,10 +1144,40 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     // Copy without pasting: the clip goes on the clipboard and the
     // panel stays open. The poller ignores the change because
     // writeToPasteboard records it as our own write.
-    func copyBack(_ item: ClipItem) {
+    // A pending close-the-panel-after-copy, so a second copy
+    // (or any other card click) within the beat cancels it —
+    // copying several clips in a row keeps the panel up until
+    // the last one.
+    var copyDismissWorkItem: DispatchWorkItem?
+
+    func copyBack(_ item: ClipItem, dismissPanel: Bool = false) {
         writeToPasteboard(item)
         flashCard(item)
         flashMenuBar("✓ Copied")
+        if dismissPanel { scheduleCopyDismiss() }
+    }
+
+    // Close the panel shortly after a "take this clip" copy
+    // (v2.14.1, Femi's request — a copy is an exit, like a
+    // paste). The beat (0.45s) lets the card's "✓ Copied"
+    // chip register before the panel goes; pasteBack uses
+    // the same trick, shorter, because a ⌘V has to land.
+    // Only the take-it copies pass dismissPanel: true (the
+    // double-click, the right-click Copy). Variant copies
+    // (Copy Text, RGB/HSL, Markdown) and Preview copies are
+    // grabs, not exits, and leave the panel up.
+    func scheduleCopyDismiss() {
+        copyDismissWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.panel.orderOut(nil)
+        }
+        copyDismissWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: work)
+    }
+
+    func cancelCopyDismiss() {
+        copyDismissWorkItem?.cancel()
+        copyDismissWorkItem = nil
     }
 
     // Copy plain text only (an image clip's OCR text); the panel
@@ -1996,7 +2026,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     }
 
     @objc func menuPaste(_ sender: NSMenuItem) { if let i = item(for: sender) { pasteBack(i) } }
-    @objc func menuCopy(_ sender: NSMenuItem) { if let i = item(for: sender) { copyBack(i) } }
+    @objc func menuCopy(_ sender: NSMenuItem) { if let i = item(for: sender) { copyBack(i, dismissPanel: true) } }
     @objc func menuCopyText(_ sender: NSMenuItem) { if let i = item(for: sender), let ocr = i.ocrText { copyText(ocr, item: i) } }
     @objc func menuCopyRGB(_ sender: NSMenuItem) { if let i = item(for: sender), let hex = i.text, let c = colorFromHex(hex) { copyText(rgbString(from: c), item: i) } }
     @objc func menuCopyHSL(_ sender: NSMenuItem) { if let i = item(for: sender), let hex = i.text, let c = colorFromHex(hex) { copyText(hslString(from: c), item: i) } }
@@ -3394,22 +3424,25 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         // Invisible click target over header + body. Click
         // model (v2.14.0, Femi's calls): a single click
         // selects the card; a double-click COPIES it back to
-        // the clipboard and the panel stays open. v2.13.0 had
-        // double-click pasting, but he reaches for it as
-        // "copy this" — and the "✓ Pasted" flash on it read
-        // wrong to him. Pasting lives on Enter, ⌘1–9, the
-        // card's paste button and the right-click menu. The
-        // Settings toggle restores one-click paste for anyone
-        // who wants the panel gone in a single click; the
-        // wiring reads it live, no rebuild needed.
+        // the clipboard (v2.13.0 had double-click pasting, but
+        // he reaches for it as "copy this" — and the
+        // "✓ Pasted" flash on it read wrong to him). Since
+        // v2.14.1 the panel then closes once the flash lands:
+        // a copy is an exit, like a paste. Pasting lives on
+        // Enter, ⌘1–9, the card's paste button and the
+        // right-click menu. The Settings toggle restores
+        // one-click paste for anyone who wants the panel gone
+        // in a single click; the wiring reads it live, no
+        // rebuild needed.
         let click = ClickView()
         click.identifier = NSUserInterfaceItemIdentifier(item.id)
         click.onClick = { [weak self] clickCount in
             guard let self else { return }
+            self.cancelCopyDismiss()
             if self.pasteOnSingleClick {
                 self.pasteBack(item)
             } else if clickCount >= 2 {
-                self.copyBack(item)
+                self.copyBack(item, dismissPanel: true)
             } else {
                 self.selectedItemID = item.id
                 self.applySelectionBorders()
