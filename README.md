@@ -16,7 +16,7 @@ copy never leaves your Mac.
 safekeeping. The app itself is called ClipKeep.)*
 
 > 🚧 **Work in progress** — ClipKeep is under active development
-> (current release: **v2.6.0**). Features, behaviour and this README
+> (current release: **v2.9.0**). Features, behaviour and this README
 > may change between versions, and things may break.
 
 ---
@@ -92,13 +92,30 @@ safekeeping. The app itself is called ClipKeep.)*
   and saved in place.
 - **Right-click menu** on every card: Paste, Copy, Preview / Edit,
   Pin, Move to Board, Add to Paste Stack, Delete — colour cards add
-  Copy as RGB / Copy as HSL.
+  Copy as RGB / Copy as HSL, text cards add a **Transform** submenu
+  (see Quick actions), and link cards add Copy as Markdown Link.
+- **Quick actions** (v2.8.0) — the Transform submenu pastes a text
+  clip transformed: as Plain Text, UPPERCASE, lowercase, Title
+  Case, or Trimmed (every line trimmed, blank runs collapsed).
+  Pretty-print JSON and Extract Links appear only when they apply
+  to the clip. **Copy as Markdown Link** copies `[page title](url)`
+  for a link clip, using its fetched preview title when present.
+- **Keyboard-first navigation** (v2.9.0) — a selection (accent
+  outline) rides the feed: **↑/↓** move it any time, **←/→** too
+  while the search is empty, **Enter** pastes it, **Space**
+  previews it, **⌫** deletes it, and typing with the search
+  unfocused jumps straight into the search field.
+- **Settings window** (v2.7.0) — General (pause, history limit,
+  panel size, clear history), Appearance (theme, Reduce
+  Transparency), Updates (version, status, check now) and Excluded
+  Apps tabs, from the ••• menu (**⌘,**) or the 📋 right-click menu.
 - **One-click updates** (v2.6.0) — when a new version is out, a slim
   strip appears under the search row (never in your feed). **Install**
   downloads it in the background with a progress bar, swaps the app
   and relaunches it; **Later** snoozes the notice to tomorrow; **✕**
   dismisses that version. Checking manually when you're current
-  flashes "✓ You're up to date".
+  flashes "✓ You're up to date". Since v2.6.1 the download is
+  verified against the feed's SHA-256 checksum before installing.
 
 ## Requirements
 
@@ -132,6 +149,11 @@ Download button and replace the app manually one last time.
 | **⌘⇧V** or click 📋 | Show / hide the panel |
 | **Click a clip** | Put it back on the clipboard (and paste it, with Accessibility permission) |
 | **⌘1–⌘9** (panel open) | Quick-paste that numbered clip |
+| **↑ / ↓ / ← / →** (panel open) | Move the selection (←/→ while the search is empty) |
+| **Enter** (panel open) | Paste the selected clip |
+| **Space** (panel open, search empty) | Preview the selected clip |
+| **⌫** (panel open, search empty) | Delete the selected clip |
+| **⌘,** | Open Settings |
 | **⌘F** (panel open) | Focus the search field |
 | **Esc** (panel open) | Clear the search, then close the panel |
 | **Pin / Unpin** | Keep a clip forever, shown first in the feed |
@@ -173,7 +195,7 @@ Download button and replace the app manually one last time.
 
 ## How it works
 
-ClipKeep is a single-file AppKit app (`main.swift`, ~3,300 lines).
+ClipKeep is a single-file AppKit app (`main.swift`, ~3,800 lines).
 It polls the system pasteboard's change count twice a second; on a
 change it skips concealed/transient copies and excluded apps, then
 records the first matching type — file, image, colour, or text —
@@ -185,7 +207,8 @@ Accessibility permission, synthesizes ⌘V. Global hotkeys use the
 Carbon hot-key API, so no entitlement or helper is needed. Updates
 are checked against a tiny public version feed (the repo is private,
 so releases can't be read anonymously); the one-click installer
-downloads the release zip, swaps the app bundle via a detached
+downloads the release zip, verifies its SHA-256 against the feed,
+swaps the app bundle via a detached
 script, and relaunches.
 
 ## Project layout
