@@ -1812,25 +1812,28 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
     func buildPanel() {
         panel = NSWindow(contentRect: defaultPanelFrame(),
-                         styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+                         styleMask: [.titled, .closable, .fullSizeContentView],
                          backing: .buffered, defer: false)
         panel.title = "ClipKeep"
         panel.appearance = NSAppearance(named: .aqua)   // Paste-style light look
         panel.level = .floating
         panel.isReleasedWhenClosed = false
+        panel.isMovable = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        panel.minSize = NSSize(width: 700, height: 400)
-        panel.contentMinSize = NSSize(width: 700, height: 380)
         panel.delegate = self
-        // Frame persistence is manual and validated — see
-        // restorePanelFrame() below. NSWindow's frame autosave is
-        // deliberately not used: it writes whatever the frame happens
-        // to be, unchecked, and a degenerate frame saved by an early
-        // build (a ~60pt-wide, full-height strip) came back verbatim
-        // on every launch and squeezed the whole panel into it.
-        // restorePanelFrame() is called at the end of buildPanel —
-        // the validated frame must be the last word, applied after
-        // the content view and its constraints exist.
+        // The panel's frame is FIXED (v2.9.1, Femi's direction:
+        // full screen width, always, non-negotiable). It is not
+        // resizable (no .resizable in the mask), not movable, and
+        // its size is pinned by applyFixedPanelFrame(), which runs
+        // at the end of buildPanel and again on every show. Nothing
+        // is persisted: earlier builds saved a validated frame to
+        // UserDefaults, but a Stage Manager clamp (~87% width)
+        // could still be saved whenever the height differed from
+        // the default, and the panel then restored narrow forever
+        // (Femi's Nov 17 Loom). A fixed frame has nothing to save.
+        NotificationCenter.default.addObserver(self, selector: #selector(screenParametersChanged),
+                                               name: NSApplication.didChangeScreenParametersNotification,
+                                               object: nil)
 
         // Frosted vibrancy background (v2.3.1, Femi's pick from the
         // mock: Warm Tint). An NSVisualEffectView replaces the flat
@@ -2156,46 +2159,30 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         // also does the first refreshList with themed cards.
         let savedThemeID = UserDefaults.standard.string(forKey: "ClipKeepTheme") ?? "warm"
         applyTheme(panelThemes.first { $0.id == savedThemeID } ?? panelThemes[0], persist: false)
-        restorePanelFrame()
+        applyFixedPanelFrame()
     }
 
-    // MARK: Panel frame persistence (manual, validated)
+    // MARK: Panel frame — fixed full-width strip (v2.9.1)
 
-    // V6: same bottom-anchored strip, but the width now comes
-    // from the screen's full frame, not its visible frame. V5
-    // used the visible frame, which on Femi's Mac is inset 215pt
-    // on the left (Stage Manager's strip) — the panel opened at
-    // ~87% of the display width with the whole gap on the left,
-    // which read as "only 75% wide". New key retires the V5 frame.
-    // The default strip height. One constant, four jobs: the
-    // panel's initial size, the restore default, the no-screen
-    // fallback, and the shape normalizedPanelFrame recognizes as
-    // "the default strip". They must never drift apart — before
-    // this constant (Nov 17 sizing audit) the literal 520 was
-    // hard-coded in all four places, so changing the height in
-    // fewer than all of them would silently break normalization.
+    // The default strip height. One constant, three jobs: the
+    // panel's initial size, the no-screen fallback, and the one
+    // fixed frame applyFixedPanelFrame() enforces. Before this
+    // constant (Nov 17 sizing audit) the literal 520 was
+    // hard-coded in four places that had to be changed together.
     private let defaultPanelHeight: CGFloat = 520
 
+    // The retired frame-persistence key (saving ended in v2.9.1);
+    // kept only so Reset Panel Size can clear a stale saved frame.
     private let panelFrameKey = "ClipKeepPanelFrameV6"
 
-    private func panelFrameIsUsable(_ f: NSRect) -> Bool {
-        guard f.width >= panel.minSize.width, f.height >= panel.minSize.height else { return false }
-        return NSScreen.screens.contains { $0.visibleFrame.intersects(f) }
-    }
-
-    // The one default frame — exactly what Reset Panel Size
-    // applies: full physical width, defaultPanelHeight tall,
-    // sitting on the bottom of the main screen's visible frame
-    // (above the Dock) — the size Femi settled on in his Nov 17
-    // Loom. Width and x come from the screen's frame (edge to
-    // edge); only the bottom anchor uses the visible frame, so
-    // the panel clears the Dock but ignores side reservations
-    // like Stage Manager's strip. Panel creation, frame restore,
-    // and Reset all take the default from here, so the app's
-    // built-in default IS the Reset size and the two can never
-    // drift apart (Femi's request, Nov 17 — previously the panel
-    // was created at 1100 wide in the corner and only became the
-    // full-width strip if the restore path ran).
+    // The one and only panel frame: full physical width,
+    // defaultPanelHeight tall, sitting on the bottom of the main
+    // screen's visible frame (above the Dock). Width and x come
+    // from the screen's frame (edge to edge); only the bottom
+    // anchor uses the visible frame, so the panel clears the Dock
+    // but ignores side reservations like Stage Manager's strip —
+    // V5 took the width from the visible frame and opened at ~87%
+    // with the whole gap on the left.
     private func defaultPanelFrame() -> NSRect {
         if let screen = NSScreen.main {
             let f = screen.frame, vf = screen.visibleFrame
@@ -2204,54 +2191,33 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         return NSRect(x: 0, y: 0, width: 1100, height: defaultPanelHeight)
     }
 
-    private func restorePanelFrame() {
-        if let saved = UserDefaults.standard.string(forKey: panelFrameKey) {
-            let f = NSRectFromString(saved)
-            if panelFrameIsUsable(f) {
-                panel.setFrame(normalizedPanelFrame(f), display: false)
-                return
-            }
-        }
-        panel.setFrame(defaultPanelFrame(), display: false)
+    // Enforce the fixed frame: pin min/max size to it and set it.
+    // Runs at the end of buildPanel, on every show (togglePanel),
+    // on display changes, and from Reset Panel Size. Correction
+    // deliberately never happens synchronously inside
+    // windowDidResize: a setFrame there triggers a layout pass
+    // that can resize the window again, and that resize ->
+    // setFrame -> layout loop is what made AppKit abort on
+    // launch in v2.1.0.
+    private func applyFixedPanelFrame() {
+        let f = defaultPanelFrame()
+        panel.minSize = f.size
+        panel.maxSize = f.size
+        if panel.frame != f { panel.setFrame(f, display: true) }
         if NSScreen.main == nil { panel.center() }
     }
 
-    private func savePanelFrame() {
-        // Only a frame that would pass restore validation is ever
-        // written, so a bad size cannot be saved in the first place.
-        guard panelFrameIsUsable(panel.frame) else { return }
-        UserDefaults.standard.set(NSStringFromRect(normalizedPanelFrame(panel.frame)), forKey: panelFrameKey)
-    }
-
-    // The default strip shape (520 tall, bottom-anchored) is a
-    // computed layout, not a user-chosen size: normalize it back
-    // to the full screen width. Without this, Stage Manager's
-    // strip clamps the window to ~87% width when it appears, the
-    // clamped frame gets saved by windowDidResize, and the panel
-    // then restores narrow forever (Femi's Nov 17 screenshot).
-    // A frame the user deliberately resized to a different
-    // height is custom and is left exactly as-is.
-    private func normalizedPanelFrame(_ f: NSRect) -> NSRect {
-        guard abs(f.height - defaultPanelHeight) < 1 else { return f }
-        guard let screen = NSScreen.screens.first(where: { $0.frame.intersects(f) }) ?? NSScreen.main
-        else { return f }
-        return NSRect(x: screen.frame.minX, y: screen.visibleFrame.minY,
-                      width: screen.frame.width, height: defaultPanelHeight)
+    @objc private func screenParametersChanged() {
+        // A different display has a different full width.
+        if panel.isVisible { applyFixedPanelFrame() }
     }
 
     func windowDidResize(_ notification: Notification) {
-        guard let w = notification.object as? NSWindow, w === panel else { return }
-        // Never call setFrame from here. A setFrame triggers a layout
-        // pass; the layout pass can resize the window again, and that
-        // resize -> setFrame -> layout loop is exactly what made
-        // AppKit throw and abort on launch in 2.1.0. Frame correction
-        // happens in togglePanel instead, before the panel is shown.
-        savePanelFrame()
-    }
-
-    func windowDidMove(_ notification: Notification) {
-        guard let w = notification.object as? NSWindow, w === panel else { return }
-        savePanelFrame()
+        // Deliberately a no-op for the panel (see
+        // applyFixedPanelFrame for why no setFrame happens here).
+        // The fixed frame is re-applied in togglePanel before
+        // every show, so a clamp the window server applies while
+        // the panel is open cannot survive the next open.
     }
 
     // Paste behaviour: the panel is a guest. When it loses key
@@ -3226,10 +3192,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     }
 
     @objc func resetPanelSize() {
-        // Drop the saved frame and re-apply the default, so a
-        // stuck or stale size is always one click from fixed.
+        // The frame is fixed in v2.9.1, so this simply re-applies
+        // it (and clears any stale pre-v2.9.1 saved frame).
         UserDefaults.standard.removeObject(forKey: panelFrameKey)
-        restorePanelFrame()
+        applyFixedPanelFrame()
     }
 
     // MARK: Excluded apps
@@ -3643,8 +3609,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             panel.orderOut(nil)
         } else {
             refreshList()
-            if !panelFrameIsUsable(panel.frame) { restorePanelFrame() }
+            applyFixedPanelFrame()
             panel.makeKeyAndOrderFront(nil)
+            // Stage Manager can clamp the frame as the panel
+            // appears in its stage; if it did, re-apply the fixed
+            // frame once, asynchronously (never synchronously from
+            // inside windowDidResize — see applyFixedPanelFrame).
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.panel.isVisible else { return }
+                if self.panel.frame != self.defaultPanelFrame() {
+                    self.applyFixedPanelFrame()
+                }
+            }
             NSApp.activate(ignoringOtherApps: true)
             panel.makeFirstResponder(searchField)
         }
