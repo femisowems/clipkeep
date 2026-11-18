@@ -12,6 +12,7 @@ import Carbon
 import ApplicationServices
 import Vision
 import UniformTypeIdentifiers
+import ImageIO
 
 // MARK: - Model
 
@@ -99,7 +100,37 @@ final class ClipStore {
         }
     }
 
+    // Saving used to encode the ENTIRE history and write it on
+    // the caller's (main) thread on every change — every copy,
+    // pin and delete paid it (lag fix, v2.12.0). Now save()
+    // snapshots the items (a cheap value-type copy), and the
+    // encode + write happen on a serial queue a beat later,
+    // coalescing bursts into one write. saveNow() is the
+    // synchronous flush, called on termination so a quit inside
+    // the debounce window loses nothing.
+    private let saveQueue = DispatchQueue(label: "io.starterdev.clipkeep.save")
+    private var pendingSnapshot: [ClipItem]?
+    private var flushScheduled = false
+
     func save() {
+        let snapshot = items
+        saveQueue.async { [weak self] in
+            guard let self else { return }
+            self.pendingSnapshot = snapshot
+            guard !self.flushScheduled else { return }
+            self.flushScheduled = true
+            self.saveQueue.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                guard let self, let snap = self.pendingSnapshot else { return }
+                self.flushScheduled = false
+                self.pendingSnapshot = nil
+                if let data = try? JSONEncoder().encode(snap) {
+                    try? data.write(to: self.fileURL, options: .atomic)
+                }
+            }
+        }
+    }
+
+    func saveNow() {
         if let data = try? JSONEncoder().encode(items) {
             try? data.write(to: fileURL, options: .atomic)
         }
@@ -1088,12 +1119,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     func pasteBack(_ item: ClipItem, fromStack: Bool = false) {
         writeToPasteboard(item)
         // Style C's accepted trade-off: when the card is on
-        // screen it flashes for ~0.4s before the panel closes
-        // and the paste lands. The Paste Stack pastes instantly
-        // (its refresh would wipe the flash anyway) and relies
-        // on the menu-bar flash.
+        // screen it flashes briefly before the panel closes
+        // and the paste lands. The flash was 0.42s until
+        // v2.12.0 — Femi reported the wait as lag between
+        // clicks, so it's 0.18s now: still visible, but the
+        // paste lands in about a quarter second. The Paste
+        // Stack pastes instantly (its refresh would wipe the
+        // flash anyway) and relies on the menu-bar flash.
         let flashed = fromStack ? false : flashCard(item)
-        DispatchQueue.main.asyncAfter(deadline: .now() + (flashed ? 0.42 : 0)) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + (flashed ? 0.18 : 0)) { [weak self] in
             guard let self else { return }
             self.panel.orderOut(nil)
             self.simulatePaste()
@@ -2828,6 +2862,54 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         return icon
     }
 
+    // MARK: Card thumbnails (v2.12.0 lag fix)
+    //
+    // Card surfaces used to decode the full-size image file on
+    // every rebuild — NSImage(contentsOf:) in rowView, and again
+    // in footerText just to read the dimensions. With an
+    // image-heavy history, every panel open and every click paid
+    // several full screenshot decodes. Now each file is decoded
+    // once, downsampled to card size (552px ≈ 276pt at 2x), and
+    // cached; dimensions come from the image source's properties
+    // without decoding pixels at all. Image files are write-once
+    // with UUID names, so a name-keyed cache can't go stale.
+    // Full originals are still used where fidelity matters:
+    // pasteboard writes and the Preview window.
+    var thumbnailCache: [String: NSImage] = [:]
+    var imageDimsCache: [String: NSSize] = [:]
+
+    func cardThumbnail(forFile name: String) -> NSImage? {
+        if let cached = thumbnailCache[name] { return cached }
+        let url = store.imagesDir.appendingPathComponent(name)
+        var result: NSImage?
+        if let src = CGImageSourceCreateWithURL(url as CFURL, nil) {
+            if let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+               let w = props[kCGImagePropertyPixelWidth] as? Int,
+               let h = props[kCGImagePropertyPixelHeight] as? Int {
+                imageDimsCache[name] = NSSize(width: w, height: h)
+            }
+            if let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: 552
+            ] as CFDictionary) {
+                result = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+            }
+        }
+        if result == nil { result = NSImage(contentsOf: url) }
+        if let result {
+            if thumbnailCache.count > 300 { thumbnailCache.removeAll() }
+            thumbnailCache[name] = result
+        }
+        return result
+    }
+
+    func imageDimensions(forFile name: String) -> NSSize? {
+        if let cached = imageDimsCache[name] { return cached }
+        _ = cardThumbnail(forFile: name)
+        return imageDimsCache[name]
+    }
+
     func footerText(for item: ClipItem) -> String {
         if isLinkItem(item), let raw = item.text,
            let url = URL(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)),
@@ -2836,9 +2918,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         }
         switch item.kind {
         case "image":
-            if let url = store.imageURL(for: item), let img = NSImage(contentsOf: url),
-               let rep = img.representations.first {
-                return "PNG · \(rep.pixelsWide) × \(rep.pixelsHigh)"
+            if let name = item.imageFile, let dims = imageDimensions(forFile: name) {
+                return "PNG · \(Int(dims.width)) × \(Int(dims.height))"
             }
             return "Image"
         case "file":
@@ -3038,7 +3119,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         switch item.kind {
         case "image":
             let iv = NSImageView()
-            if let url = store.imageURL(for: item), let img = NSImage(contentsOf: url) {
+            if let name = item.imageFile, let img = cardThumbnail(forFile: name) {
                 iv.image = img
             }
             iv.imageScaling = .scaleProportionallyUpOrDown
@@ -3139,7 +3220,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                 enrichLinkIfNeeded(item)
                 if let name = item.linkImageFile {
                     let iv = NSImageView()
-                    iv.image = NSImage(contentsOf: store.imagesDir.appendingPathComponent(name))
+                    iv.image = cardThumbnail(forFile: name)
                     iv.imageScaling = .scaleProportionallyUpOrDown
                     iv.wantsLayer = true
                     iv.layer?.cornerRadius = 8
@@ -3486,14 +3567,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             scroll.hasVerticalScroller = true
             scroll.borderType = .bezelBorder
             scroll.translatesAutoresizingMaskIntoConstraints = false
-            let clipView = NSView()
+            // FlippedView, not a plain NSView (v2.12.0): in a
+            // non-flipped document view the top-pinned stack
+            // renders from the bottom — the list opened scrolled
+            // to the wrong end with rows clipped, the same bug
+            // class as the panel feed's v2.2.1 strip bug. The
+            // bottom constraint is an equality so the document
+            // is exactly as tall as its content.
+            let clipView = FlippedView()
             clipView.addSubview(stack)
             scroll.documentView = clipView
             NSLayoutConstraint.activate([
                 stack.leadingAnchor.constraint(equalTo: clipView.leadingAnchor, constant: 8),
                 stack.trailingAnchor.constraint(equalTo: clipView.trailingAnchor, constant: -8),
                 stack.topAnchor.constraint(equalTo: clipView.topAnchor, constant: 8),
-                stack.bottomAnchor.constraint(lessThanOrEqualTo: clipView.bottomAnchor, constant: -8),
+                stack.bottomAnchor.constraint(equalTo: clipView.bottomAnchor, constant: -8),
                 clipView.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor)
             ])
             content.addSubview(scroll)
@@ -3716,14 +3804,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         scroll.hasVerticalScroller = true
         scroll.borderType = .bezelBorder
         scroll.translatesAutoresizingMaskIntoConstraints = false
-        let clipView = NSView()
+        // Flipped document view + sizing equality — same fix as
+        // the standalone window above (v2.12.0); this tab copied
+        // the broken construction, so the list rendered from the
+        // bottom here too.
+        let clipView = FlippedView()
         clipView.addSubview(eStack)
         scroll.documentView = clipView
         NSLayoutConstraint.activate([
             eStack.leadingAnchor.constraint(equalTo: clipView.leadingAnchor, constant: 8),
             eStack.trailingAnchor.constraint(equalTo: clipView.trailingAnchor, constant: -8),
             eStack.topAnchor.constraint(equalTo: clipView.topAnchor, constant: 8),
-            eStack.bottomAnchor.constraint(lessThanOrEqualTo: clipView.bottomAnchor, constant: -8),
+            eStack.bottomAnchor.constraint(equalTo: clipView.bottomAnchor, constant: -8),
             clipView.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor)
         ])
         excluded.addSubview(scroll)
@@ -3827,6 +3919,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         let key = "ClipKeepReduceTransparency"
         if (sender.state == .on) != UserDefaults.standard.bool(forKey: key) { toggleReduceTransparency() }
         sender.state = UserDefaults.standard.bool(forKey: key) ? .on : .off
+    }
+
+    // Flush any debounced history save before the process goes
+    // (v2.12.0) — quitting inside the 0.25s window, including
+    // the updater's swap-and-relaunch, must lose nothing.
+    func applicationWillTerminate(_ notification: Notification) {
+        store.saveNow()
     }
 
     // MARK: Panel toggle + hotkeys

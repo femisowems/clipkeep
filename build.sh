@@ -10,7 +10,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 swiftc -O -o "$APP/Contents/MacOS/ClipKeep" main.swift \
     -framework Cocoa -framework Carbon -framework ApplicationServices \
-    -framework Vision -framework UniformTypeIdentifiers
+    -framework Vision -framework UniformTypeIdentifiers -framework ImageIO
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -24,9 +24,9 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleIdentifier</key>
     <string>io.starterdev.clipkeep</string>
     <key>CFBundleVersion</key>
-    <string>2.11.0</string>
+    <string>2.12.0</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.11.0</string>
+    <string>2.12.0</string>
     <key>CFBundleExecutable</key>
     <string>ClipKeep</string>
     <key>CFBundlePackageType</key>
