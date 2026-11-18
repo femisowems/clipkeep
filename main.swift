@@ -1464,6 +1464,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     var updateProgressLabel: NSTextField!
     var updateStripHeight: NSLayoutConstraint!
     var tabsTopConstraint: NSLayoutConstraint!
+    // Panel spacing (v2.15.0): the search row's top gap and
+    // the feed's bottom gap are stored constraints so
+    // centerPanelContent() can balance them by measurement.
+    var panelTopConstraint: NSLayoutConstraint!
+    var panelBottomConstraint: NSLayoutConstraint!
+    var feedClipView: NSView!
     private var downloadTask: URLSessionDownloadTask?
     private var downloadSession: URLSession?
     private var pendingInstallVersion: String?
@@ -1513,12 +1519,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         let show = mode != .hidden
         updateStrip.isHidden = !show
         updateStripHeight.constant = show ? 34 : 0
-        tabsTopConstraint.constant = show ? 8 : 0
+        // The tab-row gap is 8 in both states (v2.15.0): with
+        // the strip hidden, search → tabs reads 12 (the strip's
+        // own top gap) + 8 = 20; shown, the strip is content
+        // sitting between them.
+        tabsTopConstraint.constant = 8
         updateInstallButton.isHidden = mode != .available
         updateLaterButton.isHidden = mode != .available
         updateDismissButton.isHidden = mode != .available
         updateProgress.isHidden = mode != .progress
         updateProgressLabel.isHidden = mode != .progress
+        // The strip is part of the centred stack (v2.15.0):
+        // showing or hiding it re-balances the panel.
+        centerPanelContent()
     }
 
     func refreshUpdateStrip() {
@@ -2265,10 +2278,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         listStack = FlippedStackView()
         listStack.orientation = .horizontal
         listStack.alignment = .top
-        listStack.spacing = 12
+        listStack.spacing = Self.spaceCardGap
         listStack.translatesAutoresizingMaskIntoConstraints = false
 
         let clipView = FlippedView()
+        feedClipView = clipView
         // This opt-out was missing in every build up to 2.2.1: the
         // document view kept its autoresizing constraints and
         // fought the Auto Layout ones, and AppKit broke a
@@ -2279,15 +2293,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         clipView.addSubview(listStack)
         scrollView.documentView = clipView
         NSLayoutConstraint.activate([
-            listStack.leadingAnchor.constraint(equalTo: clipView.leadingAnchor, constant: 12),
-            listStack.trailingAnchor.constraint(equalTo: clipView.trailingAnchor, constant: -12),
-            listStack.topAnchor.constraint(equalTo: clipView.topAnchor, constant: 12),
+            listStack.leadingAnchor.constraint(equalTo: clipView.leadingAnchor, constant: Self.spaceFeedInset),
+            listStack.trailingAnchor.constraint(equalTo: clipView.trailingAnchor, constant: -Self.spaceFeedInset),
+            listStack.topAnchor.constraint(equalTo: clipView.topAnchor, constant: Self.spaceFeedInset),
             // Equality, not ≤: the document view's height must be
             // driven by the stack's content height. With ≤ the
             // solver was free to collapse the document view to zero
             // height, and every row was clipped away — the panel
             // looked empty while the history on disk was full.
-            listStack.bottomAnchor.constraint(equalTo: clipView.bottomAnchor, constant: -12),
+            listStack.bottomAnchor.constraint(equalTo: clipView.bottomAnchor, constant: -Self.spaceFeedInset),
             // Horizontal feed: the document view's WIDTH is driven
             // by the cards laid out along it. Its HEIGHT comes from
             // the tallest card, via the stack's top+bottom pins
@@ -2382,15 +2396,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
         NSLayoutConstraint.activate([
             // Borderless since v2.10.0, so the safe area starts at
-            // the panel's top edge and the search row sits 12pt
-            // below it. (On the old titled full-size-content
-            // window this anchor kept the field out from under
-            // the title bar.)
-            searchField.topAnchor.constraint(equalTo: content.safeAreaLayoutGuide.topAnchor, constant: 12),
-            searchField.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
+            // the panel's top edge; the search row's top gap is
+            // the stored panelTopConstraint (created below), not
+            // part of this array. (On the old titled
+            // full-size-content window this anchor kept the field
+            // out from under the title bar.)
+            searchField.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: Self.spaceMargin),
             searchField.trailingAnchor.constraint(equalTo: overflowButton.leadingAnchor, constant: -8),
 
-            overflowButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
+            overflowButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -Self.spaceMargin),
             overflowButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
             overflowButton.widthAnchor.constraint(equalToConstant: 32),
             overflowButton.heightAnchor.constraint(equalToConstant: 32),
@@ -2400,9 +2414,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             // in the panel's left third with empty space to the
             // right). The leading floor keeps a narrow panel from
             // pushing them off the left edge.
-            updateStrip.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 8),
-            updateStrip.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
-            updateStrip.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
+            updateStrip.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 12),
+            updateStrip.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: Self.spaceMargin),
+            updateStrip.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -Self.spaceMargin),
             updateStripLabel.leadingAnchor.constraint(equalTo: updateStrip.leadingAnchor, constant: 12),
             updateStripLabel.centerYAnchor.constraint(equalTo: updateStrip.centerYAnchor),
             updateStripLabel.trailingAnchor.constraint(lessThanOrEqualTo: updateInstallButton.leadingAnchor, constant: -8),
@@ -2418,22 +2432,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             updateProgressLabel.leadingAnchor.constraint(equalTo: updateProgress.trailingAnchor, constant: 8),
             updateProgressLabel.centerYAnchor.constraint(equalTo: updateStrip.centerYAnchor),
             pillTabs.centerXAnchor.constraint(equalTo: content.centerXAnchor),
-            pillTabs.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor, constant: 12),
-            pillTabs.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -12),
+            pillTabs.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor, constant: Self.spaceMargin),
+            pillTabs.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -Self.spaceMargin),
 
-            filterBar.topAnchor.constraint(equalTo: pillTabs.bottomAnchor, constant: 8),
+            filterBar.topAnchor.constraint(equalTo: pillTabs.bottomAnchor, constant: Self.spaceRowGap),
             filterBar.centerXAnchor.constraint(equalTo: content.centerXAnchor),
-            filterBar.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor, constant: 12),
-            filterBar.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -12),
+            filterBar.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor, constant: Self.spaceMargin),
+            filterBar.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -Self.spaceMargin),
 
-            stackBar.topAnchor.constraint(equalTo: filterBar.bottomAnchor, constant: 8),
-            stackBar.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
-            stackBar.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -12),
+            stackBar.topAnchor.constraint(equalTo: filterBar.bottomAnchor, constant: Self.spaceRowGap),
+            stackBar.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: Self.spaceMargin),
+            stackBar.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -Self.spaceMargin),
 
-            scrollView.topAnchor.constraint(equalTo: stackBar.bottomAnchor, constant: 8),
-            scrollView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
-            scrollView.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
-            scrollView.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12),
+            scrollView.topAnchor.constraint(equalTo: stackBar.bottomAnchor, constant: 12),
+            scrollView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: Self.spaceMargin - Self.spaceFeedInset),
+            scrollView.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -(Self.spaceMargin - Self.spaceFeedInset)),
             // Floors so the content's fitting size can never collapse
             // the window: in 2.0.x the old rows' fitting width was
             // ~60pt and AppKit's constraint-based window sizing shrank
@@ -2447,11 +2460,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         ])
 
         // Stored so the strip can open/close by changing two
-        // constants: strip height 0/34, tab-row gap 0/8.
+        // constants: strip height 0/34, tab-row gap 8 (v2.15.0).
         updateStripHeight = updateStrip.heightAnchor.constraint(equalToConstant: 0)
         updateStripHeight.isActive = true
-        tabsTopConstraint = pillTabs.topAnchor.constraint(equalTo: updateStrip.bottomAnchor, constant: 0)
+        tabsTopConstraint = pillTabs.topAnchor.constraint(equalTo: updateStrip.bottomAnchor, constant: 8)
         tabsTopConstraint.isActive = true
+
+        // Stored for the vertical balancing (v2.15.0): the
+        // search row's top gap and the feed's bottom gap start
+        // at the margin and are then centred by measurement —
+        // see centerPanelContent().
+        panelTopConstraint = searchField.topAnchor.constraint(equalTo: content.safeAreaLayoutGuide.topAnchor, constant: Self.spaceMargin)
+        panelTopConstraint.isActive = true
+        panelBottomConstraint = scrollView.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -Self.spaceMargin)
+        panelBottomConstraint.isActive = true
 
         // Apply the saved theme (Warm Tint on first run); this
         // also does the first refreshList with themed cards.
@@ -2461,6 +2483,56 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     }
 
     // MARK: Panel frame — fixed full-width strip (v2.9.1)
+
+    // MARK: Panel spacing (v2.15.0 — "Roomy", Femi's pick C)
+
+    // One home for the panel's spacing, so the feed, the
+    // update strip and the empty state share one geometry and
+    // a future tweak is a one-line edit. Picked from the
+    // spacing mocks (Nov 18): margins 24, card gap 20, card
+    // padding 16, looser rows — plus his balance rule, the gap
+    // above the search row about equalling the gap below the
+    // cards, which centerPanelContent() enforces by
+    // measurement on top of these base values.
+    static let spaceMargin: CGFloat = 24
+    static let spaceCardGap: CGFloat = 20
+    static let spaceCardPad: CGFloat = 16
+    static let spaceRowGap: CGFloat = 16
+    static let spaceFeedInset: CGFloat = 12
+
+    // Balance the panel's vertical spacing (v2.15.0): measure
+    // the gap above the search row and the gap below the
+    // cards (the feed's visual bottom — the document's height
+    // or the viewport's, whichever ends first), then shift
+    // both stored constraints so the two gaps meet in the
+    // middle. The target is clamped: with one short clip the
+    // honest centre would float the search row mid-panel,
+    // which reads as broken, not balanced. Called after every
+    // list rebuild and strip change; converges in one pass
+    // because the content span doesn't change when both
+    // constraints move by the same delta.
+    func centerPanelContent() {
+        guard panel != nil, feedClipView != nil, searchField != nil,
+              !listStack.arrangedSubviews.isEmpty,
+              let content = panel.contentView else { return }
+        content.layoutSubtreeIfNeeded()
+        let height = content.bounds.height
+        guard height > 0 else { return }
+        // Frames are in the content's (y-up) coordinates: the
+        // search field's top edge is its maxY; the cards end at
+        // the higher of the viewport's bottom and the point
+        // the document's height reaches down from its top.
+        let topGap = height - searchField.frame.maxY
+        let cardsBottom = max(scrollView.frame.minY,
+                              scrollView.frame.maxY - feedClipView.frame.height)
+        let bottomGap = cardsBottom - content.bounds.minY
+        var target = (topGap + bottomGap) / 2
+        target = min(max(target, 18), 56)
+        let delta = target - topGap
+        guard abs(delta) >= 1 else { return }
+        panelTopConstraint.constant += delta
+        panelBottomConstraint.constant -= delta
+    }
 
     // The default strip height. One constant, three jobs: the
     // panel's initial size, the no-screen fallback, and the one
@@ -2849,7 +2921,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         // The document view's width settles a beat after the
         // rebuild — check the fade now and once more next runloop.
         updateScrollFade()
-        DispatchQueue.main.async { [weak self] in self?.updateScrollFade() }
+        centerPanelContent()
+        DispatchQueue.main.async { [weak self] in
+            self?.updateScrollFade()
+            self?.centerPanelContent()
+        }
     }
 
     func addRow(_ item: ClipItem, index: Int) {
@@ -3136,7 +3212,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             header.leadingAnchor.constraint(equalTo: card.leadingAnchor),
             header.trailingAnchor.constraint(equalTo: card.trailingAnchor),
             header.heightAnchor.constraint(equalToConstant: 46),
-            typeText.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 12),
+            typeText.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: Self.spaceCardPad),
             typeText.topAnchor.constraint(equalTo: header.topAnchor, constant: 6),
             timeText.leadingAnchor.constraint(equalTo: typeText.leadingAnchor),
             timeText.topAnchor.constraint(equalTo: typeText.bottomAnchor, constant: 1)
@@ -3194,7 +3270,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             NSLayoutConstraint.activate([
                 badgeBox.widthAnchor.constraint(equalToConstant: 32),
                 badgeBox.heightAnchor.constraint(equalToConstant: 32),
-                badgeBox.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -12),
+                badgeBox.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -Self.spaceCardPad),
                 badgeBox.centerYAnchor.constraint(equalTo: header.centerYAnchor),
                 iv.widthAnchor.constraint(equalToConstant: 24),
                 iv.heightAnchor.constraint(equalToConstant: 24),
@@ -3342,12 +3418,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                     t.maximumNumberOfLines = 2
                     t.lineBreakMode = .byTruncatingTail
                     // Wrapping labels inside the horizontal feed
-                    // need their layout width up front (276 = card
-                    // 300 − 24 insets): without it, the fitting
+                    // need their layout width up front (268 = card
+                    // 300 − 32 insets, the card padding since
+                    // v2.15.0): without it, the fitting
                     // pass can price the label at a sliver width
                     // and its "height" balloons — the cavern cards
                     // in Femi's Nov 18 screenshot.
-                    t.preferredMaxLayoutWidth = 276
+                    t.preferredMaxLayoutWidth = 268
                     body.addArrangedSubview(t)
                     fullWidth(t)
                 }
@@ -3363,7 +3440,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                 label.textColor = .labelColor
                 label.maximumNumberOfLines = 5
                 label.lineBreakMode = .byTruncatingTail
-                label.preferredMaxLayoutWidth = 276   // see the link-title note above
+                label.preferredMaxLayoutWidth = 268   // see the link-title note above
                 body.addArrangedSubview(label)
                 fullWidth(label)
             }
@@ -3475,15 +3552,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         footer.menu = menu
 
         NSLayoutConstraint.activate([
-            body.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 12),
-            body.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 12),
-            body.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -12),
+            body.topAnchor.constraint(equalTo: header.bottomAnchor, constant: Self.spaceCardPad),
+            body.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: Self.spaceCardPad),
+            body.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -Self.spaceCardPad),
 
             footer.topAnchor.constraint(equalTo: body.bottomAnchor, constant: 8),
             footer.leadingAnchor.constraint(equalTo: card.leadingAnchor),
             footer.trailingAnchor.constraint(equalTo: card.trailingAnchor),
             footer.heightAnchor.constraint(equalToConstant: 32),
-            footer.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -8),
+            footer.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -12),
 
             click.topAnchor.constraint(equalTo: card.topAnchor),
             click.leadingAnchor.constraint(equalTo: card.leadingAnchor),
@@ -3491,17 +3568,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             click.bottomAnchor.constraint(equalTo: footer.topAnchor),
 
             previewBtn.centerYAnchor.constraint(equalTo: header.centerYAnchor),
-            previewBtn.trailingAnchor.constraint(equalTo: appBadgeLeading ?? header.trailingAnchor, constant: appBadgeLeading == nil ? -12 : -6),
+            previewBtn.trailingAnchor.constraint(equalTo: appBadgeLeading ?? header.trailingAnchor, constant: appBadgeLeading == nil ? -Self.spaceCardPad : -6),
             previewBtn.widthAnchor.constraint(equalToConstant: 26),
             previewBtn.heightAnchor.constraint(equalToConstant: 26),
 
-            pin.leadingAnchor.constraint(equalTo: footer.leadingAnchor, constant: 12),
+            pin.leadingAnchor.constraint(equalTo: footer.leadingAnchor, constant: Self.spaceCardPad),
             pin.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
             pin.widthAnchor.constraint(equalToConstant: 28),
             pin.heightAnchor.constraint(equalToConstant: 28),
             boardButton.leadingAnchor.constraint(equalTo: pin.trailingAnchor, constant: 8),
             boardButton.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
-            del.trailingAnchor.constraint(equalTo: footer.trailingAnchor, constant: -12),
+            del.trailingAnchor.constraint(equalTo: footer.trailingAnchor, constant: -Self.spaceCardPad),
             del.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
             del.widthAnchor.constraint(equalToConstant: 28),
             del.heightAnchor.constraint(equalToConstant: 28),
