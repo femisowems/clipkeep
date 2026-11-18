@@ -712,12 +712,21 @@ func hslString(from color: NSColor) -> String {
 
 // MARK: - App
 
+// Borderless panel window (v2.10.0): a .borderless NSWindow
+// refuses key status by default, which would leave the search
+// field unable to take keyboard focus. Overriding canBecomeKey /
+// canBecomeMain restores normal key behaviour for the panel.
+final class BorderlessWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+}
+
 final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegate, NSWindowDelegate, URLSessionDownloadDelegate {
     static let shared = AppController()
 
     let store = ClipStore()
     var statusItem: NSStatusItem!
-    var panel: NSWindow!
+    var panel: BorderlessWindow!
     var searchField: NSSearchField!
     var pillTabs: PillTabsView!
     var boardPopup: NSPopUpButton!
@@ -1811,24 +1820,23 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     // MARK: Panel UI
 
     func buildPanel() {
-        panel = NSWindow(contentRect: defaultPanelFrame(),
-                         styleMask: [.titled, .closable, .fullSizeContentView],
-                         backing: .buffered, defer: false)
+        panel = BorderlessWindow(contentRect: defaultPanelFrame(),
+                                 styleMask: [.borderless],
+                                 backing: .buffered, defer: false)
         panel.title = "ClipKeep"
-        // No visible window chrome (v2.9.2, Femi's pick A from
-        // the mock): the traffic lights and title text are hidden.
-        // Two of the three buttons never did anything here —
-        // minimize was never enabled, and zoom died when v2.9.1
-        // locked the panel size — and close only duplicated Esc /
-        // ⌘⇧V / click-away. The window stays .titled underneath,
-        // so key-window, focus and auto-hide behaviour are
-        // untouched; the strip becomes plain panel background.
-        // The name still lives where it does a job: the ••• menu
-        // header ("ClipKeep v…"), Settings' title and Updates tab.
-        panel.titleVisibility = .hidden
-        panel.standardWindowButton(.closeButton)?.isHidden = true
-        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        panel.standardWindowButton(.zoomButton)?.isHidden = true
+        // Fully borderless panel (v2.10.0, Femi's pick B from the
+        // mock — supersedes v2.9.2's hidden chrome on a titled
+        // window). No title bar at all: the ~28pt strip is
+        // reclaimed (the search row's safe-area anchor collapses
+        // to the top edge), and the app rounds its own corners on
+        // the content layer below, since borderless windows are
+        // square by default. BorderlessWindow restores key status
+        // so search focus, the key monitor and click-away
+        // auto-hide behave exactly as they did when titled. The
+        // panel was never movable or resizable anyway (v2.9.1's
+        // fixed frame), so nothing else is lost; the name lives
+        // in the ••• menu header ("ClipKeep v…") and Settings.
+        panel.hasShadow = true
         panel.appearance = NSAppearance(named: .aqua)   // Paste-style light look
         panel.level = .floating
         panel.isReleasedWhenClosed = false
@@ -1861,6 +1869,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.contentView = content
+        // Rounded corners (v2.10.0): a borderless window is
+        // square, so the effect view's layer rounds and clips
+        // everything the panel draws; the window's shadow follows
+        // the clipped shape. 12pt reads as a deliberate panel
+        // radius at this size — one-line tweak if it ever wants
+        // to be rounder.
+        content.wantsLayer = true
+        content.layer?.cornerRadius = 12
+        content.layer?.masksToBounds = true
 
         tintView = NSView()
         tintView.wantsLayer = true
@@ -2098,10 +2115,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         updateStrip.addSubview(updateProgressLabel)
 
         NSLayoutConstraint.activate([
-            // The safe area starts below the title bar; anchoring to
-            // content.topAnchor put the search field underneath it
-            // (the panel uses .fullSizeContentView), where it was
-            // hidden except for its focus ring.
+            // Borderless since v2.10.0, so the safe area starts at
+            // the panel's top edge and the search row sits 10pt
+            // below it. (On the old titled full-size-content
+            // window this anchor kept the field out from under
+            // the title bar.)
             searchField.topAnchor.constraint(equalTo: content.safeAreaLayoutGuide.topAnchor, constant: 10),
             searchField.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
             searchField.trailingAnchor.constraint(equalTo: overflowButton.leadingAnchor, constant: -8),
