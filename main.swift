@@ -503,6 +503,7 @@ final class PillTabsView: NSView {
     private let indicator = NSView()
     private let stack = NSStackView()
     private var pills: [PillTabButton] = []
+    private var indicatorRetryScheduled = false
 
     init(types: [(type: String, title: String, symbol: String)]) {
         super.init(frame: .zero)
@@ -567,13 +568,40 @@ final class PillTabsView: NSView {
 
     override func layout() {
         super.layout()
+        // The pills are arranged by the stack, whose frames only
+        // settle once the stack's own layout has run — on the
+        // first pass this view's layout() runs before that, so
+        // the indicator read zero frames and never appeared at
+        // launch: the remembered tab showed its selected-state
+        // text (dark on-accent on the dark themes) on the bare
+        // track, with no accent fill behind it (Femi's Nov 18
+        // screenshot — the Files tab near-black on load). The
+        // panel's frame is fixed, so no later layout pass ever
+        // repaired it; only clicking a tab did. Force the
+        // stack's subtree to lay out before measuring.
+        stack.layoutSubtreeIfNeeded()
         positionIndicator(animated: false)
     }
 
     private func positionIndicator(animated: Bool) {
         guard let pill = pills.first(where: { $0.typeValue == selectedType }) else { return }
         let frame = pill.convert(pill.bounds, to: self)
-        guard frame.width > 0 else { return }
+        guard frame.width > 0 else {
+            // Called before the first layout (buildPanel selects
+            // the remembered tab while the row still has no
+            // frames): retry once on the next runloop, when the
+            // stack has arranged the pills.
+            if !indicatorRetryScheduled {
+                indicatorRetryScheduled = true
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.indicatorRetryScheduled = false
+                    self.stack.layoutSubtreeIfNeeded()
+                    self.positionIndicator(animated: false)
+                }
+            }
+            return
+        }
         if animated {
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.18
