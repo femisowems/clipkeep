@@ -68,6 +68,29 @@ Sizing is historically this app's #1 bug class — the strip bug (v2.1–v2.2), 
 - **Other windows.** Preview/edit is 580×520 (min 420×320, image area 300pt tall); Excluded Apps is 400×320. Neither persists its size.
 - **Sizing risks.** (1) The default height `520` was hard-coded in at least four places — panel creation, the restore default, the no-screen fallback, and the normalization check. **Fixed Nov 17 (commit `c2967ac`, staged for the next release):** all four now use a single `defaultPanelHeight` constant. (2) The fixed 300pt card width is a design choice, not a bug, but it's the first thing to revisit if the panel ever needs a compact mode. (3) Preview and Excluded Apps windows don't remember their size/position between opens.
 
+## Confirmation checklist — for Femi's next Mac session
+
+Everything below shipped but has never been confirmed live. One pass (~10 minutes, ideally as a single Loom) closes the whole backlog. Written for v2.14.0, which includes the fixes the Nov 18 code audit found (the capture-path flash and the up-to-date flash were genuinely broken — see the v2.14.0 shipped-log entry).
+
+**Launch & intro (v2.13.0/v2.14.0)**
+1. Quit ClipKeep, then click its icon in the Apps grid → the panel opens and the launch intro plays once (icon, name, version; cards stagger in). Clicking the icon again while it runs also opens the panel.
+2. Hide the panel and reopen with ⌘⇧V → no intro the second time; reopening is instant.
+
+**Clicking & pasting (v2.12.0–v2.14.0)**
+3. Single-click a card → it only selects (one outline, on that card). Double-click → it copies, the panel stays open, and the card chip + menu bar read "✓ Copied". Enter (or ⌘1) on the selected card → it pastes, fast (~¼ second), chip reads "✓ Pasted".
+4. Settings → General → "Paste on single click" ON → a single click pastes. Turn it back OFF (or leave it how you like it — it's a preference now).
+
+**Flashes (v2.5.2, repaired v2.14.0)**
+5. With the panel closed, copy any text in another app → the menu-bar icon briefly flashes "✓ Copied" in green.
+6. In the panel, right-click a card → Copy → the card flashes a "✓ Copied" chip.
+7. Settings → Updates → "Check for Updates…" while up to date → the strip in the panel flashes "✓ You're up to date" for ~2 seconds.
+
+**Keyboard (v2.9.0 — navigation itself confirmed Nov 18)**
+8. Arrow to a card, press Enter → it pastes. Arrow to another, press Space → Preview opens (above the panel). Arrow to a throwaway clip, press ⌫ → it's deleted.
+
+**Windows & lists (v2.12.0/v2.13.0)**
+9. With the panel open, open Settings, Preview and Excluded Apps → each opens ABOVE the panel. In Excluded Apps (both places), the list starts at the top — add an app and remove it to be sure.
+
 ## Shipped log
 
 - **v2.10.0** (Nov 17, 2026) — Fully borderless panel (Femi's pick B from the same mock, superseding v2.9.2's hidden chrome minutes later). The panel window is `.borderless` via a `BorderlessWindow` subclass overriding `canBecomeKey`/`canBecomeMain` — a borderless window refuses key status by default, which would have broken search focus; with the override, focus, the key monitor and click-away auto-hide behave as before. The ~28pt title-bar strip is reclaimed (the search row's safe-area anchor collapses to the top edge) and the effect view's layer rounds (12pt) and clips the corners — borderless windows are square by default; the shadow follows the clipped shape. Fixed frame untouched. Commit `1967d79`, CI run #37 green, asset 527,118 bytes (inner zip), sha256 `c9e5b370…64ce8c63b`.

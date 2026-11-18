@@ -56,9 +56,12 @@ safekeeping. The app itself is called ClipKeep.)*
   colours). Pinned and boarded clips never expire; a board picker
   filters the list to one board at a time.
 - **Paste back, three ways**
-  - Double-click any clip to put it back on the clipboard — and if you've
-    granted Accessibility permission, ClipKeep presses ⌘V for you so
-    it lands where your cursor is. (A single click just selects it.)
+  - Double-click any clip to copy it back to the clipboard — the
+    panel stays open. (A single click just selects it.) To paste
+    a clip straight into the app underneath instead, use
+    **⌘1–⌘9**, Enter, or the card's paste button — with
+    Accessibility permission, ClipKeep presses ⌘V for you so it
+    lands where your cursor is.
   - **⌘1–⌘9** quick-pastes the first nine visible clips while the
     panel is open (the cards show their numbers).
   - **Paste Stack** — queue clips with **+ Stack**, then paste them
@@ -135,8 +138,9 @@ safekeeping. The app itself is called ClipKeep.)*
    then **Open** again in the dialog. You only do this once.
 3. Optional but recommended: grant **Accessibility** permission
    (System Settings → Privacy & Security → Accessibility) so
-   double-click-to-paste can press ⌘V for you. Without it, double-clicking a clip
-   still copies it back to the clipboard.
+   pasting (⌘1–⌘9, Enter, the paste button) can press ⌘V for you.
+   Without it, a paste still puts the clip on the clipboard for a
+   manual ⌘V.
 
 **Updating:** from v2.6.0 on, updates install themselves from the
 strip described above. On an older version, use the update banner's
@@ -147,7 +151,7 @@ Download button and replace the app manually one last time.
 | Action | What it does |
 | --- | --- |
 | **⌘⇧V** or click the menu-bar icon | Show / hide the panel |
-| **Double-click a clip** | Put it back on the clipboard (and paste it, with Accessibility permission); a single click selects |
+| **Double-click a clip** | Copy it back to the clipboard (panel stays open); a single click selects |
 | **⌘1–⌘9** (panel open) | Quick-paste that numbered clip |
 | **↑ / ↓ / ← / →** (panel open) | Move the selection (←/→ while the search is empty) |
 | **Enter** (panel open) | Paste the selected clip |

@@ -887,10 +887,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     var settingsRTCheckbox: NSButton?
     var settingsClickCheckbox: NSButton?
 
-    // Card click behaviour (v2.14.0): double-click to paste
-    // is the default (v2.13.0, Femi's request); this Settings
-    // toggle restores single-click paste for anyone the extra
-    // click slows down. Default off = double-click.
+    // Card click behaviour (v2.14.0): by default a single
+    // click selects and a double-click copies; this Settings
+    // toggle makes a single click paste instead, for anyone
+    // who wants the panel gone in one click. Default off.
     var pasteOnSingleClick: Bool {
         UserDefaults.standard.bool(forKey: "ClipKeepPasteOnSingleClick")
     }
@@ -3391,18 +3391,25 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         meta.translatesAutoresizingMaskIntoConstraints = false
         footer.addSubview(meta)
 
-        // Invisible click target over header + body: a single
-        // click selects the card; a double-click pastes it
-        // (v2.13.0, Femi's request — single-click paste fired
-        // on clicks that only meant to select or look). The
-        // Settings toggle (v2.14.0) restores single-click
-        // paste; the wiring reads it live, no rebuild needed.
+        // Invisible click target over header + body. Click
+        // model (v2.14.0, Femi's calls): a single click
+        // selects the card; a double-click COPIES it back to
+        // the clipboard and the panel stays open. v2.13.0 had
+        // double-click pasting, but he reaches for it as
+        // "copy this" — and the "✓ Pasted" flash on it read
+        // wrong to him. Pasting lives on Enter, ⌘1–9, the
+        // card's paste button and the right-click menu. The
+        // Settings toggle restores one-click paste for anyone
+        // who wants the panel gone in a single click; the
+        // wiring reads it live, no rebuild needed.
         let click = ClickView()
         click.identifier = NSUserInterfaceItemIdentifier(item.id)
         click.onClick = { [weak self] clickCount in
             guard let self else { return }
-            if clickCount >= 2 || self.pasteOnSingleClick {
+            if self.pasteOnSingleClick {
                 self.pasteBack(item)
+            } else if clickCount >= 2 {
+                self.copyBack(item)
             } else {
                 self.selectedItemID = item.id
                 self.applySelectionBorders()
@@ -3817,7 +3824,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         let pause = NSButton(checkboxWithTitle: "Pause capture (stop recording new copies)", target: self, action: #selector(settingsPauseToggled(_:)))
         settingsPauseCheckbox = pause
         g.addArrangedSubview(pause)
-        let clickPref = NSButton(checkboxWithTitle: "Paste on single click (off = double-click to paste)", target: self, action: #selector(settingsClickToggled(_:)))
+        let clickPref = NSButton(checkboxWithTitle: "Paste on single click (off = double-click copies)", target: self, action: #selector(settingsClickToggled(_:)))
         settingsClickCheckbox = clickPref
         g.addArrangedSubview(clickPref)
         let limitRow = NSStackView()
