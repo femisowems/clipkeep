@@ -16,7 +16,7 @@ copy never leaves your Mac.
 safekeeping. The app itself is called ClipKeep.)*
 
 > 🚧 **Work in progress** — ClipKeep is under active development
-> (current release: **v2.9.2**). Features, behaviour and this README
+> (current release: **v2.10.0**). Features, behaviour and this README
 > may change between versions, and things may break.
 
 ---
