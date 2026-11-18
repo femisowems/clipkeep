@@ -212,17 +212,19 @@ final class FlippedStackView: NSStackView {
     override var isFlipped: Bool { true }
 }
 
-// Click target laid over a card: left-click pastes the clip,
-// right-click presents the card's context menu. An NSButton
-// overlay was used before, but buttons swallow right-clicks
-// without ever presenting their menu — the card menu existed
-// all along and simply never opened.
+// Click target laid over a card: left-clicks report their
+// click count (single click selects the card, double-click
+// pastes it — v2.13.0), right-click presents the card's
+// context menu. An NSButton overlay was used before, but
+// buttons swallow right-clicks without ever presenting
+// their menu — the card menu existed all along and simply
+// never opened.
 final class ClickView: NSView {
-    var onClick: (() -> Void)?
+    var onClick: ((Int) -> Void)?
     var onHover: ((Bool) -> Void)?
     private var hoverArea: NSTrackingArea?
     override func mouseDown(with event: NSEvent) {
-        onClick?()
+        onClick?(event.clickCount)
     }
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -1579,6 +1581,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             window.appearance = NSAppearance(named: .aqua)
             window.isReleasedWhenClosed = false
             window.minSize = NSSize(width: 420, height: 320)
+            window.level = .floating   // above the panel (v2.13.0) — see buildSettingsWindow
             previewWindow = window
         }
         guard let window = previewWindow else { return }
@@ -1847,7 +1850,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         if let i = item(for: sender), let t = i.text {
             let url = t.trimmingCharacters(in: .whitespacesAndNewlines)
             let title: String
-            if let lt = i.linkTitle, !lt.isEmpty { title = lt } else { title = url }
+            if let lt = i.linkTitle, !lt.isEmpty { title = cleanLinkTitle(lt) } else { title = url }
             copyText("[\(title)](\(url))", item: i)
         }
     }
@@ -3232,7 +3235,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                     fullWidth(iv)
                 }
                 if let title = item.linkTitle, !title.isEmpty {
-                    let t = NSTextField(wrappingLabelWithString: title)
+                    // Decoded at display time as well as fetch
+                    // time (v2.13.0): clips captured before
+                    // v2.11.0 still carry the raw entity in
+                    // their stored title (&#8211; on Femi's
+                    // Nov 18 panel screenshot).
+                    let t = NSTextField(wrappingLabelWithString: cleanLinkTitle(title))
                     t.font = NSFont.systemFont(ofSize: 12.5, weight: .semibold)
                     t.textColor = .labelColor
                     t.maximumNumberOfLines = 2
@@ -3317,10 +3325,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         meta.translatesAutoresizingMaskIntoConstraints = false
         footer.addSubview(meta)
 
-        // Invisible click target over header + body: click a card to paste it.
+        // Invisible click target over header + body: a single
+        // click selects the card; a double-click pastes it
+        // (v2.13.0, Femi's request — single-click paste fired
+        // on clicks that only meant to select or look).
         let click = ClickView()
         click.identifier = NSUserInterfaceItemIdentifier(item.id)
-        click.onClick = { [weak self] in self?.pasteBack(item) }
+        click.onClick = { [weak self] clickCount in
+            guard let self else { return }
+            if clickCount >= 2 {
+                self.pasteBack(item)
+            } else {
+                self.selectedItemID = item.id
+                self.applySelectionBorders()
+            }
+        }
         click.onHover = { [weak self] hovering in self?.setCardHover(card, hovering: hovering) }
         click.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(click)
@@ -3555,6 +3574,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                                   styleMask: [.titled, .closable], backing: .buffered, defer: false)
             window.title = "Excluded apps — copies from these are never recorded"
             window.isReleasedWhenClosed = false
+            window.level = .floating   // above the panel (v2.13.0) — see buildSettingsWindow
             let content = NSView()
             window.contentView = content
 
@@ -3714,6 +3734,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "ClipKeep Settings"
         window.isReleasedWhenClosed = false
+        // Above the panel (v2.13.0, Femi's screenshot): the
+        // panel floats (.floating), so a normal-level window
+        // opens UNDER it wherever they overlap — Settings,
+        // Preview and Excluded Apps all float at the panel's
+        // level, and ordering front then puts them on top.
+        window.level = .floating
         let tabs = NSTabView()
         window.contentView = tabs
 
@@ -3990,6 +4016,130 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             }
             NSApp.activate(ignoringOtherApps: true)
             panel.makeFirstResponder(searchField)
+            playIntroIfNeeded()
+        }
+    }
+
+    // MARK: Launch intro (v2.13.0, Femi's pick A)
+    //
+    // A branded beat on the FIRST panel open after a launch —
+    // and only there. Quitting and relaunching gets the intro;
+    // ordinary reopens stay instant, because a menu-bar app's
+    // panel is opened dozens of times a day and an intro on
+    // every open would be a tax, not a flourish. The overlay
+    // carries the app icon, the name and the version over the
+    // panel's own frost, holds briefly while the cards stagger
+    // in beneath it, then crossfades away. Any click or
+    // keypress skips it. Reduce Transparency drops the stagger
+    // and shortens the hold. Process-lifetime state only —
+    // nothing is persisted.
+    var introPlayedThisLaunch = false
+    var introOverlay: NSView?
+    var introWorkItems: [DispatchWorkItem] = []
+
+    func playIntroIfNeeded() {
+        guard !introPlayedThisLaunch else { return }
+        introPlayedThisLaunch = true
+        guard let host = panel.contentView else { return }
+        let reduce = UserDefaults.standard.bool(forKey: "ClipKeepReduceTransparency")
+
+        let overlay = NSVisualEffectView()
+        overlay.material = .hudWindow
+        overlay.blendingMode = .withinWindow
+        overlay.state = .active
+        overlay.translatesAutoresizingMaskIntoConstraints = false
+        // The theme tint over the frost, matching the panel the
+        // intro reveals (tintView carries the current theme's).
+        let tint = NSView()
+        tint.wantsLayer = true
+        tint.layer?.backgroundColor = tintView.layer?.backgroundColor
+        tint.translatesAutoresizingMaskIntoConstraints = false
+        overlay.addSubview(tint)
+
+        let icon = NSImageView()
+        icon.image = NSApp.applicationIconImage
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        overlay.addSubview(icon)
+        let name = NSTextField(labelWithString: "ClipKeep")
+        name.font = NSFont.systemFont(ofSize: 30, weight: .semibold)
+        name.textColor = .labelColor
+        name.translatesAutoresizingMaskIntoConstraints = false
+        overlay.addSubview(name)
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+        let ver = NSTextField(labelWithString: version.isEmpty ? "" : "v\(version)")
+        ver.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        ver.textColor = .secondaryLabelColor
+        ver.translatesAutoresizingMaskIntoConstraints = false
+        overlay.addSubview(ver)
+
+        // A full-size click layer on top: any click skips.
+        let skip = ClickView()
+        skip.onClick = { [weak self] _ in self?.dismissIntro() }
+        skip.translatesAutoresizingMaskIntoConstraints = false
+        overlay.addSubview(skip)
+
+        NSLayoutConstraint.activate([
+            tint.leadingAnchor.constraint(equalTo: overlay.leadingAnchor),
+            tint.trailingAnchor.constraint(equalTo: overlay.trailingAnchor),
+            tint.topAnchor.constraint(equalTo: overlay.topAnchor),
+            tint.bottomAnchor.constraint(equalTo: overlay.bottomAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 92),
+            icon.heightAnchor.constraint(equalToConstant: 92),
+            icon.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
+            icon.centerYAnchor.constraint(equalTo: overlay.centerYAnchor, constant: -34),
+            name.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
+            name.topAnchor.constraint(equalTo: icon.bottomAnchor, constant: 12),
+            ver.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
+            ver.topAnchor.constraint(equalTo: name.bottomAnchor, constant: 3),
+            skip.leadingAnchor.constraint(equalTo: overlay.leadingAnchor),
+            skip.trailingAnchor.constraint(equalTo: overlay.trailingAnchor),
+            skip.topAnchor.constraint(equalTo: overlay.topAnchor),
+            skip.bottomAnchor.constraint(equalTo: overlay.bottomAnchor)
+        ])
+        host.addSubview(overlay)
+        NSLayoutConstraint.activate([
+            overlay.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            overlay.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            overlay.topAnchor.constraint(equalTo: host.topAnchor),
+            overlay.bottomAnchor.constraint(equalTo: host.bottomAnchor)
+        ])
+        introOverlay = overlay
+
+        // The cards stagger in beneath the overlay as it lifts.
+        if !reduce {
+            for (i, card) in (listStack?.arrangedSubviews ?? []).enumerated() {
+                card.alphaValue = 0
+                let work = DispatchWorkItem { [weak card] in
+                    guard let card else { return }
+                    NSAnimationContext.runAnimationGroup { ctx in
+                        ctx.duration = 0.3
+                        card.animator().alphaValue = 1
+                    }
+                }
+                introWorkItems.append(work)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45 + Double(min(i, 10)) * 0.05, execute: work)
+            }
+        }
+        let dismiss = DispatchWorkItem { [weak self] in self?.dismissIntro() }
+        introWorkItems.append(dismiss)
+        DispatchQueue.main.asyncAfter(deadline: .now() + (reduce ? 0.7 : 1.15), execute: dismiss)
+    }
+
+    func dismissIntro() {
+        guard let overlay = introOverlay else { return }
+        introOverlay = nil
+        for work in introWorkItems { work.cancel() }
+        introWorkItems.removeAll()
+        // Any card still mid-stagger lands fully visible.
+        for card in listStack?.arrangedSubviews ?? [] { card.alphaValue = 1 }
+        if UserDefaults.standard.bool(forKey: "ClipKeepReduceTransparency") {
+            overlay.removeFromSuperview()
+        } else {
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.35
+                overlay.animator().alphaValue = 0
+            }, completionHandler: { overlay.removeFromSuperview() })
         }
     }
 
@@ -4054,6 +4204,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         let digitCodes: [UInt16: Int] = [18: 1, 19: 2, 20: 3, 21: 4, 23: 5, 22: 6, 26: 7, 28: 8, 25: 9]
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, self.panel.isVisible, self.panel.isKeyWindow else { return event }
+            // While the launch intro is up, any key skips it
+            // (v2.13.0) — and is consumed, so the keypress that
+            // dismisses the intro doesn't also act on the feed.
+            if self.introOverlay != nil {
+                self.dismissIntro()
+                return nil
+            }
             let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             // Esc: clear a non-empty search first; only an Esc
             // with an already-empty search closes the panel.
