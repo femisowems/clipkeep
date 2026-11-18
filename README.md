@@ -8,6 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/femisowems/keepsake/actions/workflows/build.yml"><img src="https://github.com/femisowems/keepsake/actions/workflows/build.yml/badge.svg" alt="Build status"></a>
+  <a href="https://github.com/femisowems/keepsake/releases"><img src="https://img.shields.io/badge/version-v2.14.0-e4572e" alt="Latest version"></a>
 </p>
 
 ClipKeep is a tiny, free, open-source macOS menu bar app that remembers
