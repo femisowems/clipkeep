@@ -188,9 +188,22 @@ final class FlippedStackView: NSStackView {
 // all along and simply never opened.
 final class ClickView: NSView {
     var onClick: (() -> Void)?
+    var onHover: ((Bool) -> Void)?
+    private var hoverArea: NSTrackingArea?
     override func mouseDown(with event: NSEvent) {
         onClick?()
     }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        let area = NSTrackingArea(rect: bounds,
+                                  options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        hoverArea = area
+    }
+    override func mouseEntered(with event: NSEvent) { onHover?(true) }
+    override func mouseExited(with event: NSEvent) { onHover?(false) }
     override func rightMouseDown(with event: NSEvent) {
         if let menu {
             NSMenu.popUpContextMenu(menu, with: event, for: self)
@@ -198,6 +211,12 @@ final class ClickView: NSView {
             super.rightMouseDown(with: event)
         }
     }
+}
+
+// A view that never takes clicks — overlays (the scroll fade)
+// sit above content without swallowing its events.
+final class PassthroughView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 // MARK: Panel themes (v2.5.0)
@@ -402,10 +421,10 @@ final class PillTabButton: HoverButton {
         stack.addArrangedSubview(badgeView)
 
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 11),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -11),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
-            heightAnchor.constraint(equalToConstant: 26),
+            heightAnchor.constraint(equalToConstant: 28),
             badgeLabel.leadingAnchor.constraint(equalTo: badgeView.leadingAnchor, constant: 5),
             badgeLabel.trailingAnchor.constraint(equalTo: badgeView.trailingAnchor, constant: -5),
             badgeLabel.topAnchor.constraint(equalTo: badgeView.topAnchor, constant: 1),
@@ -726,6 +745,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
     let store = ClipStore()
     var statusItem: NSStatusItem!
+    var timeRefreshTimer: Timer?
     var panel: BorderlessWindow!
     var searchField: NSSearchField!
     var pillTabs: PillTabsView!
@@ -742,6 +762,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     var stackLabel: NSTextField!
     var listStack: NSStackView!
     var scrollView: NSScrollView!
+    var scrollFade: PassthroughView!
     var emptyLabel: NSTextField!
     var exclusionsWindow: NSWindow?
     var exclusionsStack: NSStackView?
@@ -774,11 +795,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
-            button.title = "📋"
             button.action = #selector(statusItemClicked)
             button.target = self
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
+        refreshStatusItem()
 
         buildPanel()
         checkForUpdate()
@@ -788,6 +809,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         lastChangeCount = NSPasteboard.general.changeCount
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.pollClipboard()
+        }
+        // Fresh timestamps (v2.11.0): the cards' relative times
+        // ("39 minutes ago") otherwise only change when the list
+        // rebuilds for another reason. Once a minute, if the
+        // panel is open and key, rebuild with the scroll position
+        // preserved. The timer runs in the default run-loop mode,
+        // so it cannot fire while a menu is tracking or a modal
+        // is up; selection survives via selectedItemID.
+        timeRefreshTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            guard let self, self.panel != nil, self.panel.isVisible, self.panel.isKeyWindow,
+                  self.scrollView != nil else { return }
+            let origin = self.scrollView.contentView.bounds.origin
+            self.refreshList()
+            self.scrollView.contentView.scrollTo(origin)
+            self.scrollView.reflectScrolledClipView(self.scrollView.contentView)
         }
     }
 
@@ -1012,11 +1048,32 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         return true
     }
 
+    // The menu-bar item is an SF Symbol template image
+    // (v2.11.0), not the 📋 emoji it was until now — the emoji
+    // rendered in colour at text metrics and never matched the
+    // native menu-bar icons around it. Paused dims the icon and
+    // adds ⏸; the copy/paste flash swaps the image for green
+    // text temporarily and restores through here.
+    func refreshStatusItem() {
+        guard let button = statusItem?.button else { return }
+        if let img = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: "ClipKeep") {
+            let configured = img.withSymbolConfiguration(
+                NSImage.SymbolConfiguration(pointSize: 16, weight: .regular))
+            configured.isTemplate = true
+            button.image = configured
+        }
+        button.imagePosition = .imageLeading
+        button.title = capturePaused ? "⏸" : ""
+        button.attributedTitle = NSAttributedString(string: button.title)
+        button.alphaValue = capturePaused ? 0.45 : 1.0
+    }
+
     private var menuFlashGeneration = 0
     func flashMenuBar(_ text: String) {
         guard let button = statusItem?.button else { return }
         menuFlashGeneration += 1
         let gen = menuFlashGeneration
+        button.image = nil
         button.attributedTitle = NSAttributedString(string: text, attributes: [
             .foregroundColor: NSColor.systemGreen,
             .font: NSFont.systemFont(ofSize: 13, weight: .semibold)
@@ -1024,8 +1081,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         button.title = text
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
             guard let self, self.menuFlashGeneration == gen else { return }
-            self.statusItem?.button?.title = "📋"
-            self.statusItem?.button?.attributedTitle = NSAttributedString(string: "📋")
+            self.refreshStatusItem()
         }
     }
 
@@ -1132,13 +1188,57 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         }.resume()
     }
 
+    // Fetched page titles arrive raw: HTML entities undecoded
+    // ("&#8211;" printed literally on a card, Nov 18) and with
+    // whatever newlines the page's <head> had. Decode the common
+    // named entities plus any numeric ones, then collapse all
+    // whitespace runs to single spaces.
+    private func cleanLinkTitle(_ raw: String) -> String {
+        var s = raw
+        let named: [(String, String)] = [
+            ("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", "\""),
+            ("&apos;", "'"), ("&nbsp;", " "), ("&ndash;", "–"), ("&mdash;", "—"),
+            ("&lsquo;", "‘"), ("&rsquo;", "’"), ("&ldquo;", "“"), ("&rdquo;", "”"),
+            ("&hellip;", "…"), ("&copy;", "©"), ("&middot;", "·")
+        ]
+        for (entity, replacement) in named {
+            s = s.replacingOccurrences(of: entity, with: replacement)
+        }
+        var out = ""
+        var rest = Substring(s)
+        while let start = rest.range(of: "&#") {
+            out += rest[..<start.lowerBound]
+            let tail = rest[start.upperBound...]
+            if let end = tail.firstIndex(of: ";"), tail.distance(from: tail.startIndex, to: end) <= 8 {
+                let code = tail[..<end]
+                let value: Int? = code.hasPrefix("x") || code.hasPrefix("X")
+                    ? Int(code.dropFirst(), radix: 16)
+                    : Int(code)
+                if let value, let scalar = Unicode.Scalar(value) {
+                    out += String(Character(scalar))
+                    rest = tail[tail.index(after: end)...]
+                    continue
+                }
+            }
+            out += "&#"
+            rest = tail
+        }
+        out += rest
+        return out.components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
     private func finishLinkFetch(id: String, title: String?, imageFile: String?) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.linkFetchesInFlight.remove(id)
             guard let idx = self.store.items.firstIndex(where: { $0.id == id }) else { return }
             self.store.items[idx].linkChecked = true
-            if let title, !title.isEmpty { self.store.items[idx].linkTitle = title }
+            if let title, !title.isEmpty {
+                let cleaned = self.cleanLinkTitle(title)
+                if !cleaned.isEmpty { self.store.items[idx].linkTitle = cleaned }
+            }
             if let imageFile { self.store.items[idx].linkImageFile = imageFile }
             self.store.save()
             self.refreshList()
@@ -1872,11 +1972,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         // Rounded corners (v2.10.0): a borderless window is
         // square, so the effect view's layer rounds and clips
         // everything the panel draws; the window's shadow follows
-        // the clipped shape. 12pt reads as a deliberate panel
-        // radius at this size — one-line tweak if it ever wants
-        // to be rounder.
+        // the clipped shape. Radius 16 since v2.11.0 — 12 read
+        // slightly tight at full-screen width, and current macOS
+        // panels use the larger radius. The hairline edge border
+        // is set in applyTheme, where the theme (and therefore
+        // the right border colour) is known.
         content.wantsLayer = true
-        content.layer?.cornerRadius = 12
+        content.layer?.cornerRadius = 16
         content.layer?.masksToBounds = true
 
         tintView = NSView()
@@ -1999,6 +2101,30 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(scrollView)
 
+        // Right-edge scroll fade (v2.11.0): a gradient overlay on
+        // the feed's right edge, shown only while more cards sit
+        // off-screen that way. PassthroughView — it never takes
+        // clicks meant for the cards or the scroller beneath it.
+        scrollFade = PassthroughView()
+        scrollFade.wantsLayer = true
+        let fadeGradient = CAGradientLayer()
+        fadeGradient.startPoint = NSPoint(x: 0, y: 0.5)
+        fadeGradient.endPoint = NSPoint(x: 1, y: 0.5)
+        scrollFade.layer = fadeGradient
+        scrollFade.translatesAutoresizingMaskIntoConstraints = false
+        scrollFade.isHidden = true
+        content.addSubview(scrollFade)
+        NSLayoutConstraint.activate([
+            scrollFade.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
+            scrollFade.topAnchor.constraint(equalTo: scrollView.topAnchor),
+            scrollFade.bottomAnchor.constraint(equalTo: scrollView.bottomAnchor),
+            scrollFade.widthAnchor.constraint(equalToConstant: 56)
+        ])
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(scrollPositionChanged),
+                                               name: NSView.boundsDidChangeNotification,
+                                               object: scrollView.contentView)
+
         // Flipped to match the document view — see FlippedStackView.
         listStack = FlippedStackView()
         listStack.orientation = .horizontal
@@ -2052,14 +2178,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         // "•••" button beside the search field, leaving the panel
         // to the cards.
         overflowButton = HoverButton(frame: .zero)
-        overflowButton.title = "•••"
-        overflowButton.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        overflowButton.title = ""
+        if let img = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: "More actions") {
+            overflowButton.image = img.withSymbolConfiguration(
+                NSImage.SymbolConfiguration(pointSize: 14, weight: .semibold))
+        }
+        overflowButton.imagePosition = .imageOnly
         overflowButton.target = self
         overflowButton.action = #selector(showOverflowMenu(_:))
         overflowButton.normalBG = NSColor(white: 1, alpha: 0.55)
         overflowButton.hoverBG = NSColor(white: 1, alpha: 0.85)
         overflowButton.pressedBG = NSColor(white: 0, alpha: 0.10)
-        overflowButton.chromeCornerRadius = 15
+        overflowButton.chromeCornerRadius = 16
         overflowButton.chromeBorderColor = NSColor(white: 0, alpha: 0.10)
         overflowButton.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(overflowButton)
@@ -2116,18 +2246,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
         NSLayoutConstraint.activate([
             // Borderless since v2.10.0, so the safe area starts at
-            // the panel's top edge and the search row sits 10pt
+            // the panel's top edge and the search row sits 12pt
             // below it. (On the old titled full-size-content
             // window this anchor kept the field out from under
             // the title bar.)
-            searchField.topAnchor.constraint(equalTo: content.safeAreaLayoutGuide.topAnchor, constant: 10),
-            searchField.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
+            searchField.topAnchor.constraint(equalTo: content.safeAreaLayoutGuide.topAnchor, constant: 12),
+            searchField.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
             searchField.trailingAnchor.constraint(equalTo: overflowButton.leadingAnchor, constant: -8),
 
-            overflowButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -10),
+            overflowButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
             overflowButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
-            overflowButton.widthAnchor.constraint(equalToConstant: 30),
-            overflowButton.heightAnchor.constraint(equalToConstant: 30),
+            overflowButton.widthAnchor.constraint(equalToConstant: 32),
+            overflowButton.heightAnchor.constraint(equalToConstant: 32),
 
             // The tab row and the filter row are centered as
             // groups (Femi's Nov 17 Loom: left-aligned, they sat
@@ -2135,8 +2265,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             // right). The leading floor keeps a narrow panel from
             // pushing them off the left edge.
             updateStrip.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 8),
-            updateStrip.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
-            updateStrip.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -10),
+            updateStrip.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
+            updateStrip.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
             updateStripLabel.leadingAnchor.constraint(equalTo: updateStrip.leadingAnchor, constant: 12),
             updateStripLabel.centerYAnchor.constraint(equalTo: updateStrip.centerYAnchor),
             updateStripLabel.trailingAnchor.constraint(lessThanOrEqualTo: updateInstallButton.leadingAnchor, constant: -8),
@@ -2152,22 +2282,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             updateProgressLabel.leadingAnchor.constraint(equalTo: updateProgress.trailingAnchor, constant: 8),
             updateProgressLabel.centerYAnchor.constraint(equalTo: updateStrip.centerYAnchor),
             pillTabs.centerXAnchor.constraint(equalTo: content.centerXAnchor),
-            pillTabs.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor, constant: 10),
-            pillTabs.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -10),
+            pillTabs.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor, constant: 12),
+            pillTabs.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -12),
 
             filterBar.topAnchor.constraint(equalTo: pillTabs.bottomAnchor, constant: 8),
             filterBar.centerXAnchor.constraint(equalTo: content.centerXAnchor),
-            filterBar.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor, constant: 10),
-            filterBar.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -10),
+            filterBar.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor, constant: 12),
+            filterBar.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -12),
 
             stackBar.topAnchor.constraint(equalTo: filterBar.bottomAnchor, constant: 8),
-            stackBar.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
-            stackBar.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -10),
+            stackBar.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
+            stackBar.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -12),
 
             scrollView.topAnchor.constraint(equalTo: stackBar.bottomAnchor, constant: 8),
-            scrollView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
-            scrollView.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -10),
-            scrollView.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10),
+            scrollView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
+            scrollView.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
+            scrollView.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12),
             // Floors so the content's fitting size can never collapse
             // the window: in 2.0.x the old rows' fitting width was
             // ~60pt and AppKit's constraint-based window sizing shrank
@@ -2305,6 +2435,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             UserDefaults.standard.set(theme.id, forKey: "ClipKeepTheme")
         }
         panel?.appearance = NSAppearance(named: theme.dark ? .darkAqua : .aqua)
+        // Panel edge (v2.11.0): a hairline border on the content
+        // layer, keyed to the theme — white at low alpha on dark
+        // themes, black on light ones. A borderless frosted panel
+        // otherwise has no defined edge of its own: against a
+        // busy or low-contrast wallpaper (Femi's Nov 18
+        // screenshot) the outline, the bottom edge especially,
+        // all but disappears into the desktop. Native popovers
+        // draw the same hairline for the same reason.
+        if let layer = panel?.contentView?.layer {
+            layer.borderWidth = 1
+            layer.borderColor = (theme.dark
+                ? NSColor.white.withAlphaComponent(0.16)
+                : NSColor.black.withAlphaComponent(0.12)).cgColor
+        }
         // Reduce Transparency (••• menu) makes the theme tint
         // fully opaque, so the desktop stops showing through the
         // frosted panel.
@@ -2360,7 +2504,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         let allItem = NSMenuItem(title: "All boards", action: nil, keyEquivalent: "")
         allItem.representedObject = nil as String?
         boardPopup.menu?.addItem(allItem)
-        let pinnedItem = NSMenuItem(title: "📌 Pinned", action: nil, keyEquivalent: "")
+        let pinnedItem = NSMenuItem(title: "Pinned", action: nil, keyEquivalent: "")
         pinnedItem.representedObject = "__pinned"
         boardPopup.menu?.addItem(pinnedItem)
         var names = store.boards
@@ -2368,7 +2512,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             if let b = item.board, !names.contains(b) { names.append(b) }
         }
         for name in names {
-            let menuItem = NSMenuItem(title: "🗂 " + name, action: nil, keyEquivalent: "")
+            let menuItem = NSMenuItem(title: name, action: nil, keyEquivalent: "")
             menuItem.representedObject = name
             boardPopup.menu?.addItem(menuItem)
         }
@@ -2472,6 +2616,30 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         return result
     }
 
+    @objc private func scrollPositionChanged() { updateScrollFade() }
+
+    // The fade's colour and visibility (v2.11.0). The gradient
+    // runs from clear to the theme tint at near-full strength —
+    // the closest match to the panel's frosted background a flat
+    // overlay can make, and the standard solid-background fade
+    // reads fine over it. Visible only while the feed overflows
+    // to the right and isn't scrolled to the end. Called from
+    // refreshList and on every scroll; applyTheme reaches it
+    // through refreshList, so the colour follows the theme.
+    func updateScrollFade() {
+        guard scrollView != nil, scrollFade != nil,
+              let doc = scrollView.documentView else { return }
+        if let gradient = scrollFade.layer as? CAGradientLayer {
+            let edge = currentTheme.tint.withAlphaComponent(0.95)
+            gradient.colors = [edge.withAlphaComponent(0).cgColor, edge.cgColor]
+        }
+        let clip = scrollView.contentView
+        let maxOffset = doc.frame.width - clip.bounds.width
+        let overflowing = maxOffset > 1
+        let atEnd = clip.bounds.origin.x >= maxOffset - 1
+        scrollFade.isHidden = !overflowing || atEnd
+    }
+
     func refreshList() {
         guard listStack != nil else { return }
         rebuildBoardPopup()
@@ -2542,6 +2710,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             selectedItemID = items.first?.id
         }
         applySelectionBorders()
+        // The document view's width settles a beat after the
+        // rebuild — check the fade now and once more next runloop.
+        updateScrollFade()
+        DispatchQueue.main.async { [weak self] in self?.updateScrollFade() }
     }
 
     func addRow(_ item: ClipItem, index: Int) {
@@ -2552,6 +2724,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         // the stack stretched cards to full panel height and left
         // them mostly blank inside (the other mood in the demo).
         row.widthAnchor.constraint(equalToConstant: 300).isActive = true
+        // …but natural height gets a hard cap (v2.11.0): in Femi's
+        // Nov 18 screenshot, two cards ballooned to ~1.5× the
+        // tallest honest card — empty in the middle, footers sunk
+        // to the bottom — while their neighbours stayed compact.
+        // Honest heights top out around 285pt (image cards), so
+        // the cap sits just above that; the wrapping labels also
+        // carry preferredMaxLayoutWidth now (see rowView), which
+        // keeps their fitting heights honest in the first place.
+        row.heightAnchor.constraint(lessThanOrEqualToConstant: 312).isActive = true
         // The current clip (⌘1) gets Paste's blue selection outline.
         if index == 0 {
             row.layer?.borderColor = NSColor.controlAccentColor.cgColor
@@ -2675,6 +2856,30 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         }
     }
 
+    // Card hover lift (v2.11.0, from Femi's polish picks): the
+    // card's shadow deepens and spreads while the cursor is over
+    // it — the feed's only "this is clickable" signal before the
+    // click itself. Shadow only: the selection border and the
+    // copy/paste flash both work through the border and are
+    // untouched by this.
+    func setCardHover(_ card: NSView, hovering: Bool) {
+        guard let layer = card.layer else { return }
+        let toOpacity: Float = hovering ? 0.18 : 0.08
+        let toRadius: CGFloat = hovering ? 12 : 6
+        let opacityAnim = CABasicAnimation(keyPath: "shadowOpacity")
+        opacityAnim.fromValue = layer.presentation()?.shadowOpacity ?? layer.shadowOpacity
+        opacityAnim.toValue = toOpacity
+        opacityAnim.duration = 0.15
+        layer.add(opacityAnim, forKey: "shadowOpacity")
+        let radiusAnim = CABasicAnimation(keyPath: "shadowRadius")
+        radiusAnim.fromValue = layer.presentation()?.shadowRadius ?? layer.shadowRadius
+        radiusAnim.toValue = toRadius
+        radiusAnim.duration = 0.15
+        layer.add(radiusAnim, forKey: "shadowRadius")
+        layer.shadowOpacity = toOpacity
+        layer.shadowRadius = toRadius
+    }
+
     // Card footer actions are icon buttons (v2.4.0 button
     // overhaul): pin, stack, delete as SF Symbols with hover
     // washes. Delete is the danger variant — it washes red on
@@ -2685,12 +2890,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         let b = HoverButton(frame: .zero)
         if let img = NSImage(systemSymbolName: symbol, accessibilityDescription: tip) {
             b.image = img.withSymbolConfiguration(
-                NSImage.SymbolConfiguration(pointSize: 13, weight: .medium))
+                NSImage.SymbolConfiguration(pointSize: 14, weight: .semibold))
         }
         b.imagePosition = .imageOnly
         b.target = self
         b.action = action
-        b.baseTint = active ? currentTheme.accent : .secondaryLabelColor
+        // Legibility (v2.11.0): the footer glyphs were the
+        // faintest thing on the card at secondaryLabelColor —
+        // labelColor at 82% reads at a glance on light and dark
+        // cards alike. The pinned state keeps the accent, delete
+        // keeps its red hover.
+        b.baseTint = active ? currentTheme.accent : NSColor.labelColor.withAlphaComponent(0.82)
         b.hoverBG = currentTheme.hoverWash
         b.pressedBG = currentTheme.pressedWash
         if danger {
@@ -2760,19 +2970,29 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             badge.translatesAutoresizingMaskIntoConstraints = false
             header.addSubview(badge)
             NSLayoutConstraint.activate([
-                badge.leadingAnchor.constraint(equalTo: lastInHeader, constant: 7),
+                badge.leadingAnchor.constraint(equalTo: lastInHeader, constant: 8),
                 badge.centerYAnchor.constraint(equalTo: typeText.centerYAnchor)
             ])
             lastInHeader = badge.trailingAnchor
         }
         if item.pinned {
-            let pinMark = NSTextField(labelWithString: "📌")
-            pinMark.font = NSFont.systemFont(ofSize: 9)
+            // SF Symbol, not the 📌 emoji (v2.11.0 icon pass) —
+            // same reasoning as the menu-bar item: the emoji sat
+            // at a different weight and baseline than everything
+            // around it.
+            let pinMark = NSImageView()
+            if let img = NSImage(systemSymbolName: "pin.fill", accessibilityDescription: "Pinned") {
+                pinMark.image = img.withSymbolConfiguration(
+                    NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold))
+            }
+            pinMark.contentTintColor = onBand
             pinMark.translatesAutoresizingMaskIntoConstraints = false
             header.addSubview(pinMark)
             NSLayoutConstraint.activate([
-                pinMark.leadingAnchor.constraint(equalTo: lastInHeader, constant: 6),
-                pinMark.centerYAnchor.constraint(equalTo: typeText.centerYAnchor)
+                pinMark.leadingAnchor.constraint(equalTo: lastInHeader, constant: 8),
+                pinMark.centerYAnchor.constraint(equalTo: typeText.centerYAnchor),
+                pinMark.widthAnchor.constraint(equalToConstant: 12),
+                pinMark.heightAnchor.constraint(equalToConstant: 12)
             ])
         }
         var appBadgeLeading: NSLayoutXAxisAnchor? = nil
@@ -2794,7 +3014,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             NSLayoutConstraint.activate([
                 badgeBox.widthAnchor.constraint(equalToConstant: 32),
                 badgeBox.heightAnchor.constraint(equalToConstant: 32),
-                badgeBox.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -10),
+                badgeBox.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -12),
                 badgeBox.centerYAnchor.constraint(equalTo: header.centerYAnchor),
                 iv.widthAnchor.constraint(equalToConstant: 24),
                 iv.heightAnchor.constraint(equalToConstant: 24),
@@ -2807,7 +3027,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         let body = NSStackView()
         body.orientation = .vertical
         body.alignment = .leading
-        body.spacing = 6
+        body.spacing = 8
         body.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(body)
 
@@ -2936,6 +3156,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                     t.textColor = .labelColor
                     t.maximumNumberOfLines = 2
                     t.lineBreakMode = .byTruncatingTail
+                    // Wrapping labels inside the horizontal feed
+                    // need their layout width up front (276 = card
+                    // 300 − 24 insets): without it, the fitting
+                    // pass can price the label at a sliver width
+                    // and its "height" balloons — the cavern cards
+                    // in Femi's Nov 18 screenshot.
+                    t.preferredMaxLayoutWidth = 276
                     body.addArrangedSubview(t)
                     fullWidth(t)
                 }
@@ -2951,6 +3178,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                 label.textColor = .labelColor
                 label.maximumNumberOfLines = 5
                 label.lineBreakMode = .byTruncatingTail
+                label.preferredMaxLayoutWidth = 276   // see the link-title note above
                 body.addArrangedSubview(label)
                 fullWidth(label)
             }
@@ -2971,7 +3199,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         boardButton.toolTip = "Move to a pinboard"
         boardButton.identifier = NSUserInterfaceItemIdentifier(item.id)
         boardButton.translatesAutoresizingMaskIntoConstraints = false
-        let headerItem = NSMenuItem(title: item.board.map { "🗂 \($0)" } ?? "🗂 Board", action: nil, keyEquivalent: "")
+        let headerItem = NSMenuItem(title: item.board ?? "Board", action: nil, keyEquivalent: "")
         boardButton.menu?.addItem(headerItem)
         let noneItem = NSMenuItem(title: "No board", action: #selector(boardChosen(_:)), keyEquivalent: "")
         noneItem.target = self
@@ -3001,6 +3229,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         meta.textColor = .secondaryLabelColor
         meta.alignment = .center
         meta.lineBreakMode = .byTruncatingTail
+        // The metadata yields first when the footer is tight —
+        // until v2.11.0 the board popup was the one squeezed,
+        // down to "Bo…" (Femi's Nov 18 screenshot).
+        meta.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         meta.translatesAutoresizingMaskIntoConstraints = false
         footer.addSubview(meta)
 
@@ -3008,13 +3240,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         let click = ClickView()
         click.identifier = NSUserInterfaceItemIdentifier(item.id)
         click.onClick = { [weak self] in self?.pasteBack(item) }
+        click.onHover = { [weak self] hovering in self?.setCardHover(card, hovering: hovering) }
         click.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(click)
 
         // Preview / edit button in the header — added after the click
         // overlay so the overlay does not swallow its clicks.
         let previewBtn = NSButton()
-        previewBtn.image = NSImage(systemSymbolName: "eye", accessibilityDescription: "Preview")
+        if let img = NSImage(systemSymbolName: "eye", accessibilityDescription: "Preview") {
+            previewBtn.image = img.withSymbolConfiguration(
+                NSImage.SymbolConfiguration(pointSize: 13, weight: .medium))
+        }
         previewBtn.bezelStyle = .inline
         previewBtn.isBordered = false
         previewBtn.contentTintColor = onBand
@@ -3031,15 +3267,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         footer.menu = menu
 
         NSLayoutConstraint.activate([
-            body.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 10),
+            body.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 12),
             body.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 12),
             body.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -12),
 
             footer.topAnchor.constraint(equalTo: body.bottomAnchor, constant: 8),
             footer.leadingAnchor.constraint(equalTo: card.leadingAnchor),
             footer.trailingAnchor.constraint(equalTo: card.trailingAnchor),
-            footer.heightAnchor.constraint(equalToConstant: 28),
-            footer.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -4),
+            footer.heightAnchor.constraint(equalToConstant: 32),
+            footer.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -8),
 
             click.topAnchor.constraint(equalTo: card.topAnchor),
             click.leadingAnchor.constraint(equalTo: card.leadingAnchor),
@@ -3048,23 +3284,23 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
             previewBtn.centerYAnchor.constraint(equalTo: header.centerYAnchor),
             previewBtn.trailingAnchor.constraint(equalTo: appBadgeLeading ?? header.trailingAnchor, constant: appBadgeLeading == nil ? -12 : -6),
-            previewBtn.widthAnchor.constraint(equalToConstant: 20),
-            previewBtn.heightAnchor.constraint(equalToConstant: 20),
+            previewBtn.widthAnchor.constraint(equalToConstant: 26),
+            previewBtn.heightAnchor.constraint(equalToConstant: 26),
 
-            pin.leadingAnchor.constraint(equalTo: footer.leadingAnchor, constant: 10),
+            pin.leadingAnchor.constraint(equalTo: footer.leadingAnchor, constant: 12),
             pin.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
-            pin.widthAnchor.constraint(equalToConstant: 26),
-            pin.heightAnchor.constraint(equalToConstant: 26),
+            pin.widthAnchor.constraint(equalToConstant: 28),
+            pin.heightAnchor.constraint(equalToConstant: 28),
             boardButton.leadingAnchor.constraint(equalTo: pin.trailingAnchor, constant: 8),
             boardButton.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
-            del.trailingAnchor.constraint(equalTo: footer.trailingAnchor, constant: -10),
+            del.trailingAnchor.constraint(equalTo: footer.trailingAnchor, constant: -12),
             del.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
-            del.widthAnchor.constraint(equalToConstant: 26),
-            del.heightAnchor.constraint(equalToConstant: 26),
+            del.widthAnchor.constraint(equalToConstant: 28),
+            del.heightAnchor.constraint(equalToConstant: 28),
             stack.trailingAnchor.constraint(equalTo: del.leadingAnchor, constant: -4),
             stack.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
-            stack.widthAnchor.constraint(equalToConstant: 26),
-            stack.heightAnchor.constraint(equalToConstant: 26),
+            stack.widthAnchor.constraint(equalToConstant: 28),
+            stack.heightAnchor.constraint(equalToConstant: 28),
             meta.centerXAnchor.constraint(equalTo: footer.centerXAnchor),
             meta.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
             meta.leadingAnchor.constraint(greaterThanOrEqualTo: boardButton.trailingAnchor, constant: 8),
@@ -3159,7 +3395,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
     @objc func togglePause() {
         capturePaused.toggle()
-        statusItem.button?.title = capturePaused ? "📋⏸" : "📋"
+        refreshStatusItem()
     }
 
     // The panel's "•••" menu (built fresh on every click, so the
