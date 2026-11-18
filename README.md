@@ -1,8 +1,14 @@
-# ClipKeep for Mac
+<p align="center">
+  <img src="AppIcon-1024.png" width="160" alt="ClipKeep app icon — stacked cards in coral, teal and mustard">
+</p>
 
-[![Build](https://github.com/femisowems/keepsake/actions/workflows/build.yml/badge.svg)](https://github.com/femisowems/keepsake/actions/workflows/build.yml)
+<h1 align="center">ClipKeep for Mac</h1>
 
-**Everything you copy, kept — privately, on your Mac.**
+<p align="center"><strong>Everything you copy, kept — privately, on your Mac.</strong></p>
+
+<p align="center">
+  <a href="https://github.com/femisowems/keepsake/actions/workflows/build.yml"><img src="https://github.com/femisowems/keepsake/actions/workflows/build.yml/badge.svg" alt="Build status"></a>
+</p>
 
 ClipKeep is a tiny, free, open-source macOS menu bar app that remembers
 what you copy — text, images, files and colours — so the thing you copied
@@ -16,10 +22,17 @@ copy never leaves your Mac.
 safekeeping. The app itself is called ClipKeep.)*
 
 > 🚧 **Work in progress** — ClipKeep is under active development
-> (current release: **v2.13.0**). Features, behaviour and this README
+> (current release: **v2.14.0**). Features, behaviour and this README
 > may change between versions, and things may break.
 
 ---
+
+![The ClipKeep panel in the Warm Tint theme](panel-warm.png)
+
+*The panel in the Warm Tint theme — an illustration with placeholder
+clips from a developer's day (a code snippet, a pull-request link, a
+design colour, a diagram, build output, a spec file). The real thing
+holds whatever you copy.*
 
 ## Features
 
@@ -33,7 +46,7 @@ safekeeping. The app itself is called ClipKeep.)*
   `#RRGGBB`, `rgb()`, `hsl()` — and it files as a colour clip, not
   text.
 - **A horizontal feed of cards** — 300pt cards in a bottom-anchored,
-  full-width strip, pinned clips first, the current clip outlined.
+  full-width strip, pinned clips first, the selected card outlined.
   Every card has a coloured header band per type (text cards take
   their colour from the app you copied from, links are teal, files
   blue, images purple, colour clips wear the colour itself), the
@@ -184,23 +197,40 @@ Download button and replace the app manually one last time.
 - Quitting the app stops capture; your history is still there next
   launch.
 
+## Mobile app — coming soon
+
+A ClipKeep companion for phones is planned for once the Mac app is
+finished. It won't be a mirror of the Mac app: iOS and Android both
+forbid passive clipboard capture, so no phone app can quietly record
+everything you copy the way the Mac app does. The mobile version is
+designed around that limit instead:
+
+- **Deliberate capture** — save clips on purpose: share text, links
+  and images to ClipKeep from any app, with an Android Quick Settings
+  tile for one-tap saving of what's on the clipboard right now.
+- **Your Mac history, in your pocket** — a synced viewer for finding
+  a clip on your phone and copying it back. Sync starts with a
+  Google Drive folder; end-to-end encrypted sync is the longer-term
+  plan. Password-manager and other sensitive clips never sync.
+- **Android first** — built for the phone its author actually
+  carries; the iPhone version follows the same deliberate-capture
+  design (share sheet, Shortcuts, the system paste control).
+
+The full feasibility research is in
+[`MOBILE-RESEARCH.md`](MOBILE-RESEARCH.md).
+
 ## What it deliberately does not do
 
 - **No iCloud sync yet.** Sync is on the roadmap; ClipKeep stays a
   single file you can read end to end. (This is the commercial apps'
   real advantage — noted honestly.)
-- **No phone app yet.** A mobile version is on the roadmap for after
-  the Mac app is done. Research notes (`MOBILE-RESEARCH.md`) found
-  that iOS and Android both forbid passive clipboard capture, so the
-  mobile app will be a deliberate-capture companion, not a mirror of
-  the Mac app.
 - **No AI features.** The one exception is on-device text
   recognition for search, which runs entirely on your Mac.
 - **No rich-text storage** — see above; plain text on purpose.
 
 ## How it works
 
-ClipKeep is a single-file AppKit app (`main.swift`, ~3,800 lines).
+ClipKeep is a single-file AppKit app (`main.swift`, ~4,400 lines).
 It polls the system pasteboard's change count twice a second; on a
 change it skips concealed/transient copies and excluded apps, then
 records the first matching type — file, image, colour, or text —
@@ -221,6 +251,8 @@ script, and relaunches.
 ```
 keepsake/
 ├── main.swift           # the whole app — capture, panel, paste-back, updates
+├── tests.swift          # logic tests for the pure helpers (text, colour, store)
+├── run-tests.sh         # compiles and runs the tests; CI runs it before the build
 ├── build.sh             # compiles ClipKeep.app with swiftc (no Xcode project)
 ├── SPEC.md              # the v2 spec this build implements
 ├── ROADMAP.md           # improvement list, inspection notes, shipped log

@@ -1,7 +1,8 @@
 // ClipKeep logic tests (v2.14.0).
 //
 // Built only by run-tests.sh, which CI runs before the app
-// build: swiftc -D CLIPKEEP_TESTS main.swift tests.swift.
+// build: bash run-tests.sh (it strips the app entry from
+// main.swift into a copy, then compiles it with this file).
 // The flag compiles out main.swift's app entry point, so the
 // @main below is the test runner's entry. The checks cover
 // the pure logic — text helpers, colour parsing, hashing,
