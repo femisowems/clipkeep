@@ -1815,6 +1815,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                          styleMask: [.titled, .closable, .fullSizeContentView],
                          backing: .buffered, defer: false)
         panel.title = "ClipKeep"
+        // No visible window chrome (v2.9.2, Femi's pick A from
+        // the mock): the traffic lights and title text are hidden.
+        // Two of the three buttons never did anything here —
+        // minimize was never enabled, and zoom died when v2.9.1
+        // locked the panel size — and close only duplicated Esc /
+        // ⌘⇧V / click-away. The window stays .titled underneath,
+        // so key-window, focus and auto-hide behaviour are
+        // untouched; the strip becomes plain panel background.
+        // The name still lives where it does a job: the ••• menu
+        // header ("ClipKeep v…"), Settings' title and Updates tab.
+        panel.titleVisibility = .hidden
+        panel.standardWindowButton(.closeButton)?.isHidden = true
+        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        panel.standardWindowButton(.zoomButton)?.isHidden = true
         panel.appearance = NSAppearance(named: .aqua)   // Paste-style light look
         panel.level = .floating
         panel.isReleasedWhenClosed = false

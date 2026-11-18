@@ -24,9 +24,9 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleIdentifier</key>
     <string>io.starterdev.clipkeep</string>
     <key>CFBundleVersion</key>
-    <string>2.9.1</string>
+    <string>2.9.2</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.9.1</string>
+    <string>2.9.2</string>
     <key>CFBundleExecutable</key>
     <string>ClipKeep</string>
     <key>CFBundlePackageType</key>
