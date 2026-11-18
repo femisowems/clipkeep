@@ -16,7 +16,7 @@ copy never leaves your Mac.
 safekeeping. The app itself is called ClipKeep.)*
 
 > 🚧 **Work in progress** — ClipKeep is under active development
-> (current release: **v2.9.0**). Features, behaviour and this README
+> (current release: **v2.9.1**). Features, behaviour and this README
 > may change between versions, and things may break.
 
 ---
@@ -164,14 +164,15 @@ Download button and replace the app manually one last time.
 | **Clear history** | Delete everything except pinned and boarded clips |
 | **Pause capture** | Stop recording new copies until you resume |
 | **Excluded apps…** | Manage the list of apps whose copies are never recorded |
-| **Reset Panel Size** (••• menu) | Restore the default full-width strip |
+| **Reset Panel Size** (••• menu) | Re-apply the fixed full-width size (the panel's size is locked) |
 | **Limit popup** | History size: 200 / 500 / 1000 / no limit |
 
 ### Good to know
 
-- The panel remembers its size and position between launches, and
-  validates the saved frame before restoring it — a bad size can't
-  stick.
+- The panel's size is **fixed**: full screen width × 520 tall,
+  anchored above the Dock (v2.9.1). It can't be resized or moved,
+  and it re-applies that frame every time it opens — full width,
+  always.
 - Text is stored as **plain text** — formatting is stripped at
   capture, deliberately. What you paste back is clean text.
 - Deleting an image clip deletes its stored PNG too; there are no
