@@ -6,7 +6,7 @@
 set -e
 cd "$(dirname "$0")"
 
-swiftc -D CLIPKEEP_TESTS -O -o clipkeep-tests main.swift tests.swift \
+swiftc -D CLIPKEEP_TESTS -parse-as-library -O -o clipkeep-tests main.swift tests.swift \
     -framework Cocoa -framework Carbon -framework ApplicationServices \
     -framework Vision -framework UniformTypeIdentifiers -framework ImageIO
 
