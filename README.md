@@ -16,14 +16,14 @@ copy never leaves your Mac.
 safekeeping. The app itself is called ClipKeep.)*
 
 > 🚧 **Work in progress** — ClipKeep is under active development
-> (current release: **v2.10.0**). Features, behaviour and this README
+> (current release: **v2.11.0**). Features, behaviour and this README
 > may change between versions, and things may break.
 
 ---
 
 ## Features
 
-- **Menu bar app, no Dock icon** — a 📋 in your menu bar (⏸ while
+- **Menu bar app, no Dock icon** — a clipboard icon in your menu bar (dimmed, with ⏸, while
   capture is paused), and a floating panel toggled by clicking it or
   pressing **⌘⇧V** from any app. The panel steps aside on its own
   when you switch to another app.
@@ -65,7 +65,7 @@ safekeeping. The app itself is called ClipKeep.)*
     in order with **⌃⌥⌘V**, built for forms and repetitive entry.
 - **Confirmation you can see** — copying or pasting flashes a
   "✓ Copied" chip and an accent outline on the card itself, and the
-  📋 menu-bar item flashes green "✓ Copied" / "✓ Pasted", so actions
+  menu-bar icon flashes green "✓ Copied" / "✓ Pasted", so actions
   with no card on screen (Preview copies, the Paste Stack) confirm
   too.
 - **Four panel themes** — Warm Tint (light, frosted), Midnight,
@@ -108,7 +108,7 @@ safekeeping. The app itself is called ClipKeep.)*
 - **Settings window** (v2.7.0) — General (pause, history limit,
   panel size, clear history), Appearance (theme, Reduce
   Transparency), Updates (version, status, check now) and Excluded
-  Apps tabs, from the ••• menu (**⌘,**) or the 📋 right-click menu.
+  Apps tabs, from the ••• menu (**⌘,**) or the menu-bar icon's right-click menu.
 - **One-click updates** (v2.6.0) — when a new version is out, a slim
   strip appears under the search row (never in your feed). **Install**
   downloads it in the background with a progress bar, swaps the app
@@ -146,7 +146,7 @@ Download button and replace the app manually one last time.
 
 | Action | What it does |
 | --- | --- |
-| **⌘⇧V** or click 📋 | Show / hide the panel |
+| **⌘⇧V** or click the menu-bar icon | Show / hide the panel |
 | **Click a clip** | Put it back on the clipboard (and paste it, with Accessibility permission) |
 | **⌘1–⌘9** (panel open) | Quick-paste that numbered clip |
 | **↑ / ↓ / ← / →** (panel open) | Move the selection (←/→ while the search is empty) |
