@@ -822,7 +822,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                   self.scrollView != nil else { return }
             let origin = self.scrollView.contentView.bounds.origin
             self.refreshList()
-            self.scrollView.contentView.scrollTo(origin)
+            self.scrollView.contentView.scroll(to: origin)
             self.scrollView.reflectScrolledClipView(self.scrollView.contentView)
         }
     }
@@ -1056,9 +1056,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     // text temporarily and restores through here.
     func refreshStatusItem() {
         guard let button = statusItem?.button else { return }
-        if let img = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: "ClipKeep") {
-            let configured = img.withSymbolConfiguration(
-                NSImage.SymbolConfiguration(pointSize: 16, weight: .regular))
+        if let img = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: "ClipKeep"),
+           let configured = img.withSymbolConfiguration(
+               NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)) {
             configured.isTemplate = true
             button.image = configured
         }
