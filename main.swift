@@ -4396,12 +4396,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 }
 
 // MARK: - Main
-
-// Compiled out of the test build (CLIPKEEP_TESTS): tests.swift
-// supplies its own @main entry, and the two cannot coexist.
-#if !CLIPKEEP_TESTS
+//
+// The app entry. run-tests.sh builds the test runner from a
+// copy of this file with everything from this MARK line to
+// the end stripped out, so the entry never reaches the test
+// compile (tests.swift supplies its own @main). Keep this
+// section LAST in the file.
 let delegate = AppController.shared
 let app = NSApplication.shared
 app.delegate = delegate
 app.run()
-#endif
