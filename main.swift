@@ -762,6 +762,87 @@ func hslString(from color: NSColor) -> String {
     return "hsl(\(Int(round(h))), \(Int(round(s * 100)))%, \(Int(round(l * 100)))%)"
 }
 
+// MARK: - Text helpers (pure — covered by tests.swift)
+//
+// Free functions, not AppController methods, so the CI
+// test runner can call them without standing up the app.
+// Keep them free of app state.
+
+// Fetched page titles arrive raw: HTML entities undecoded
+// ("&#8211;" printed literally on a card, Nov 18) and with
+// whatever newlines the page's <head> had. Decode the common
+// named entities plus any numeric ones, then collapse all
+// whitespace runs to single spaces.
+func cleanLinkTitle(_ raw: String) -> String {
+    var s = raw
+    let named: [(String, String)] = [
+        ("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", "\""),
+        ("&apos;", "'"), ("&nbsp;", " "), ("&ndash;", "–"), ("&mdash;", "—"),
+        ("&lsquo;", "‘"), ("&rsquo;", "’"), ("&ldquo;", "“"), ("&rdquo;", "”"),
+        ("&hellip;", "…"), ("&copy;", "©"), ("&middot;", "·")
+    ]
+    for (entity, replacement) in named {
+        s = s.replacingOccurrences(of: entity, with: replacement)
+    }
+    var out = ""
+    var rest = Substring(s)
+    while let start = rest.range(of: "&#") {
+        out += rest[..<start.lowerBound]
+        let tail = rest[start.upperBound...]
+        if let end = tail.firstIndex(of: ";"), tail.distance(from: tail.startIndex, to: end) <= 8 {
+            let code = tail[..<end]
+            let value: Int? = code.hasPrefix("x") || code.hasPrefix("X")
+                ? Int(code.dropFirst(), radix: 16)
+                : Int(code)
+            if let value, let scalar = Unicode.Scalar(value) {
+                out += String(Character(scalar))
+                rest = tail[tail.index(after: end)...]
+                continue
+            }
+        }
+        out += "&#"
+        rest = tail
+    }
+    out += rest
+    return out.components(separatedBy: .whitespacesAndNewlines)
+        .filter { !$0.isEmpty }
+        .joined(separator: " ")
+}
+
+func extractURLs(_ text: String) -> [String] {
+    guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return [] }
+    let range = NSRange(text.startIndex..., in: text)
+    return detector.matches(in: text, range: range).compactMap { $0.url?.absoluteString }
+}
+
+func prettyJSON(_ text: String) -> String? {
+    guard let data = text.data(using: .utf8),
+          let obj = try? JSONSerialization.jsonObject(with: data),
+          JSONSerialization.isValidJSONObject(obj),
+          let pretty = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]),
+          let s = String(data: pretty, encoding: .utf8),
+          s != text.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+    return s
+}
+
+// Trim each line, drop the ragged ends, and collapse runs of
+// blank lines to one — the "clean this paste up" transform.
+func trimmedText(_ text: String) -> String {
+    var out: [String] = []
+    var lastBlank = false
+    for raw in text.components(separatedBy: "\n") {
+        let line = raw.trimmingCharacters(in: .whitespaces)
+        if line.isEmpty {
+            if lastBlank { continue }
+            lastBlank = true
+        } else {
+            lastBlank = false
+        }
+        out.append(line)
+    }
+    return out.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
 // MARK: - App
 
 // Borderless panel window (v2.10.0): a .borderless NSWindow
@@ -804,6 +885,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     var settingsLimitPopup: NSPopUpButton?
     var settingsThemePopup: NSPopUpButton?
     var settingsRTCheckbox: NSButton?
+    var settingsClickCheckbox: NSButton?
+
+    // Card click behaviour (v2.14.0): double-click to paste
+    // is the default (v2.13.0, Femi's request); this Settings
+    // toggle restores single-click paste for anyone the extra
+    // click slows down. Default off = double-click.
+    var pasteOnSingleClick: Bool {
+        UserDefaults.standard.bool(forKey: "ClipKeepPasteOnSingleClick")
+    }
     var settingsUpdateStatus: NSTextField?
     var settingsExclusionsStack: NSStackView?
 
@@ -892,11 +982,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                                      options: [.urlReadingFileURLsOnly: true]) as? [URL],
            let first = urls.first {
             if store.items.first?.kind == "file" && store.items.first?.filePath == first.path { return }
-            store.insert(ClipItem(id: UUID().uuidString, kind: "file", text: nil, imageFile: nil,
-                                  createdAt: now, pinned: false, filePath: first.path,
-                                  sourceApp: sourceName, sourceBundleID: sourceBundle,
-                                  ocrText: nil, board: nil, contentHash: nil))
+            let newItem = ClipItem(id: UUID().uuidString, kind: "file", text: nil, imageFile: nil,
+                                   createdAt: now, pinned: false, filePath: first.path,
+                                   sourceApp: sourceName, sourceBundleID: sourceBundle,
+                                   ocrText: nil, board: nil, contentHash: nil)
+            store.insert(newItem)
             refreshList()
+            noteCapture(newItem)
             return
         }
 
@@ -911,11 +1003,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             let url = store.imagesDir.appendingPathComponent(name)
             if (try? png.write(to: url)) != nil {
                 let id = UUID().uuidString
-                store.insert(ClipItem(id: id, kind: "image", text: nil, imageFile: name,
-                                      createdAt: now, pinned: false, filePath: nil,
-                                      sourceApp: sourceName, sourceBundleID: sourceBundle,
-                                      ocrText: nil, board: nil, contentHash: hash))
+                let newItem = ClipItem(id: id, kind: "image", text: nil, imageFile: name,
+                                       createdAt: now, pinned: false, filePath: nil,
+                                       sourceApp: sourceName, sourceBundleID: sourceBundle,
+                                       ocrText: nil, board: nil, contentHash: hash)
+                store.insert(newItem)
                 refreshList()
+                noteCapture(newItem)
                 recognizeText(in: png) { [weak self] text in
                     guard let self, let text,
                           let idx = self.store.items.firstIndex(where: { $0.id == id }) else { return }
@@ -933,11 +1027,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
            let color = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSColor.self, from: data) {
             let hex = hexString(from: color)
             if store.items.first?.kind == "color" && store.items.first?.text == hex { return }
-            store.insert(ClipItem(id: UUID().uuidString, kind: "color", text: hex, imageFile: nil,
-                                  createdAt: now, pinned: false, filePath: nil,
-                                  sourceApp: sourceName, sourceBundleID: sourceBundle,
-                                  ocrText: nil, board: nil, contentHash: nil))
+            let newItem = ClipItem(id: UUID().uuidString, kind: "color", text: hex, imageFile: nil,
+                                   createdAt: now, pinned: false, filePath: nil,
+                                   sourceApp: sourceName, sourceBundleID: sourceBundle,
+                                   ocrText: nil, board: nil, contentHash: nil)
+            store.insert(newItem)
             refreshList()
+            noteCapture(newItem)
             return
         }
 
@@ -948,11 +1044,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             if let color = colorFromLiteral(text) {
                 let hex = hexString(from: color)
                 if store.items.first?.kind == "color" && store.items.first?.text == hex { return }
-                store.insert(ClipItem(id: UUID().uuidString, kind: "color", text: hex, imageFile: nil,
-                                      createdAt: now, pinned: false, filePath: nil,
-                                      sourceApp: sourceName, sourceBundleID: sourceBundle,
-                                      ocrText: nil, board: nil, contentHash: nil))
+                let newItem = ClipItem(id: UUID().uuidString, kind: "color", text: hex, imageFile: nil,
+                                       createdAt: now, pinned: false, filePath: nil,
+                                       sourceApp: sourceName, sourceBundleID: sourceBundle,
+                                       ocrText: nil, board: nil, contentHash: nil)
+                store.insert(newItem)
                 refreshList()
+                noteCapture(newItem)
                 return
             }
             if store.items.first?.kind == "text" && store.items.first?.text == text { return }
@@ -963,7 +1061,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             store.insert(newItem)
             refreshList()
             enrichLinkIfNeeded(newItem)
+            noteCapture(newItem)
         }
+    }
+
+    // Style D on the capture path (v2.14.0): a clip captured
+    // from another app flashes the menu bar "✓ Copied", and
+    // its card as well when the panel is open. Until now the
+    // flashes only fired for copies/pastes started inside
+    // ClipKeep, so the v2.5.2 confirmation was invisible for
+    // ordinary copies — which is why it could never be
+    // confirmed on Femi's Mac. Self-writes never reach here
+    // (the poller's changeCount guard returns first), and
+    // deduped repeats return before inserting.
+    func noteCapture(_ item: ClipItem) {
+        flashMenuBar("✓ Copied")
+        if panel.isVisible { flashCard(item) }
     }
 
     // On-device text recognition for image clips (Vision). Runs the
@@ -1045,14 +1158,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     }
 
     // Flashes the item's card if it is on screen; returns whether
-    // it did, so paste can hold the panel for the flash.
+    // it did, so paste can hold the panel for the flash. The chip
+    // label matches the action ("✓ Copied" / "✓ Pasted") — until
+    // v2.14.0 it was hardcoded "✓ Copied", so pastes flashed the
+    // wrong word on the card.
     @discardableResult
-    func flashCard(_ item: ClipItem) -> Bool {
+    func flashCard(_ item: ClipItem, label: String = "✓ Copied") -> Bool {
         guard let card = cardView(for: item), let layer = card.layer else { return false }
         let oldBorder = layer.borderColor, oldWidth = layer.borderWidth
         layer.borderColor = currentTheme.accent.cgColor
         layer.borderWidth = 2.5
-        let chip = NSTextField(labelWithString: "✓ Copied")
+        let chip = NSTextField(labelWithString: label)
         chip.font = NSFont.systemFont(ofSize: 11, weight: .bold)
         chip.textColor = .white
         chip.alignment = .center
@@ -1128,7 +1244,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         // paste lands in about a quarter second. The Paste
         // Stack pastes instantly (its refresh would wipe the
         // flash anyway) and relies on the menu-bar flash.
-        let flashed = fromStack ? false : flashCard(item)
+        let flashed = fromStack ? false : flashCard(item, label: "✓ Pasted")
         DispatchQueue.main.asyncAfter(deadline: .now() + (flashed ? 0.18 : 0)) { [weak self] in
             guard let self else { return }
             self.panel.orderOut(nil)
@@ -1224,47 +1340,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         }.resume()
     }
 
-    // Fetched page titles arrive raw: HTML entities undecoded
-    // ("&#8211;" printed literally on a card, Nov 18) and with
-    // whatever newlines the page's <head> had. Decode the common
-    // named entities plus any numeric ones, then collapse all
-    // whitespace runs to single spaces.
-    private func cleanLinkTitle(_ raw: String) -> String {
-        var s = raw
-        let named: [(String, String)] = [
-            ("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", "\""),
-            ("&apos;", "'"), ("&nbsp;", " "), ("&ndash;", "–"), ("&mdash;", "—"),
-            ("&lsquo;", "‘"), ("&rsquo;", "’"), ("&ldquo;", "“"), ("&rdquo;", "”"),
-            ("&hellip;", "…"), ("&copy;", "©"), ("&middot;", "·")
-        ]
-        for (entity, replacement) in named {
-            s = s.replacingOccurrences(of: entity, with: replacement)
-        }
-        var out = ""
-        var rest = Substring(s)
-        while let start = rest.range(of: "&#") {
-            out += rest[..<start.lowerBound]
-            let tail = rest[start.upperBound...]
-            if let end = tail.firstIndex(of: ";"), tail.distance(from: tail.startIndex, to: end) <= 8 {
-                let code = tail[..<end]
-                let value: Int? = code.hasPrefix("x") || code.hasPrefix("X")
-                    ? Int(code.dropFirst(), radix: 16)
-                    : Int(code)
-                if let value, let scalar = Unicode.Scalar(value) {
-                    out += String(Character(scalar))
-                    rest = tail[tail.index(after: end)...]
-                    continue
-                }
-            }
-            out += "&#"
-            rest = tail
-        }
-        out += rest
-        return out.components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
-    }
-
     private func finishLinkFetch(id: String, title: String?, imageFile: String?) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -1272,7 +1347,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             guard let idx = self.store.items.firstIndex(where: { $0.id == id }) else { return }
             self.store.items[idx].linkChecked = true
             if let title, !title.isEmpty {
-                let cleaned = self.cleanLinkTitle(title)
+                let cleaned = cleanLinkTitle(title)
                 if !cleaned.isEmpty { self.store.items[idx].linkTitle = cleaned }
             }
             if let imageFile { self.store.items[idx].linkImageFile = imageFile }
@@ -1367,13 +1442,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             let current = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
             let sha = obj["sha256"] as? String
             DispatchQueue.main.async {
+                var flashedUpToDate = false
                 if latest.compare(current, options: .numeric) == .orderedDescending {
                     self.availableUpdate = (latest, url, sha)
                 } else {
                     self.availableUpdate = nil
-                    if manual { self.flashUpToDateStrip() }
+                    if manual { self.flashUpToDateStrip(); flashedUpToDate = true }
                 }
-                self.refreshUpdateStrip()
+                // The flash owns the strip until its own delayed
+                // refresh restores it (v2.14.0): refreshing here
+                // hid "✓ You're up to date" in the same runloop
+                // turn, before a single frame could render — the
+                // flash was unreachable, which is why a manual
+                // check never showed anything.
+                if !flashedUpToDate { self.refreshUpdateStrip() }
                 self.refreshSettingsUpdateStatus()
             }
         }.resume()
@@ -1805,39 +1887,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     // submenu only offers transforms that apply: Pretty JSON
     // appears only when the text parses as JSON and printing it
     // changes it; Extract Links only when the text has a URL.
-    func extractURLs(_ text: String) -> [String] {
-        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return [] }
-        let range = NSRange(text.startIndex..., in: text)
-        return detector.matches(in: text, range: range).compactMap { $0.url?.absoluteString }
-    }
-
-    func prettyJSON(_ text: String) -> String? {
-        guard let data = text.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data),
-              JSONSerialization.isValidJSONObject(obj),
-              let pretty = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]),
-              let s = String(data: pretty, encoding: .utf8),
-              s != text.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
-        return s
-    }
-
-    // Trim each line, drop the ragged ends, and collapse runs of
-    // blank lines to one — the "clean this paste up" transform.
-    func trimmedText(_ text: String) -> String {
-        var out: [String] = []
-        var lastBlank = false
-        for raw in text.components(separatedBy: "\n") {
-            let line = raw.trimmingCharacters(in: .whitespaces)
-            if line.isEmpty {
-                if lastBlank { continue }
-                lastBlank = true
-            } else {
-                lastBlank = false
-            }
-            out.append(line)
-        }
-        return out.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-    }
+    // (The pure transforms themselves — extractURLs, prettyJSON,
+    // trimmedText — are free functions in the Text helpers
+    // section, so tests.swift can cover them.)
 
     @objc func menuTransformPlain(_ sender: NSMenuItem) { if let i = item(for: sender), let t = i.text { pasteText(t) } }
     @objc func menuTransformUpper(_ sender: NSMenuItem) { if let i = item(for: sender), let t = i.text { pasteText(t.uppercased()) } }
@@ -3325,12 +3377,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         // Invisible click target over header + body: a single
         // click selects the card; a double-click pastes it
         // (v2.13.0, Femi's request — single-click paste fired
-        // on clicks that only meant to select or look).
+        // on clicks that only meant to select or look). The
+        // Settings toggle (v2.14.0) restores single-click
+        // paste; the wiring reads it live, no rebuild needed.
         let click = ClickView()
         click.identifier = NSUserInterfaceItemIdentifier(item.id)
         click.onClick = { [weak self] clickCount in
             guard let self else { return }
-            if clickCount >= 2 {
+            if clickCount >= 2 || self.pasteOnSingleClick {
                 self.pasteBack(item)
             } else {
                 self.selectedItemID = item.id
@@ -3746,6 +3800,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         let pause = NSButton(checkboxWithTitle: "Pause capture (stop recording new copies)", target: self, action: #selector(settingsPauseToggled(_:)))
         settingsPauseCheckbox = pause
         g.addArrangedSubview(pause)
+        let clickPref = NSButton(checkboxWithTitle: "Paste on single click (off = double-click to paste)", target: self, action: #selector(settingsClickToggled(_:)))
+        settingsClickCheckbox = clickPref
+        g.addArrangedSubview(clickPref)
         let limitRow = NSStackView()
         limitRow.orientation = .horizontal
         limitRow.spacing = 8
@@ -3873,6 +3930,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
     func syncSettingsControls() {
         settingsPauseCheckbox?.state = capturePaused ? .on : .off
+        settingsClickCheckbox?.state = pasteOnSingleClick ? .on : .off
         if let popup = settingsLimitPopup {
             for i in 0..<popup.numberOfItems where (popup.item(at: i)?.representedObject as? Int) == store.historyLimit {
                 popup.selectItem(at: i)
@@ -3942,6 +4000,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         let key = "ClipKeepReduceTransparency"
         if (sender.state == .on) != UserDefaults.standard.bool(forKey: key) { toggleReduceTransparency() }
         sender.state = UserDefaults.standard.bool(forKey: key) ? .on : .off
+    }
+
+    @objc func settingsClickToggled(_ sender: NSButton) {
+        UserDefaults.standard.set(sender.state == .on, forKey: "ClipKeepPasteOnSingleClick")
     }
 
     // Flush any debounced history save before the process goes
@@ -4311,7 +4373,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
 // MARK: - Main
 
+// Compiled out of the test build (CLIPKEEP_TESTS): tests.swift
+// supplies its own @main entry, and the two cannot coexist.
+#if !CLIPKEEP_TESTS
 let delegate = AppController.shared
 let app = NSApplication.shared
 app.delegate = delegate
 app.run()
+#endif
