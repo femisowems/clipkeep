@@ -2537,6 +2537,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         } else {
             for (index, item) in items.enumerated() { addRow(item, index: index) }
         }
+        // Keyboard navigation (roadmap #2): keep the selection
+        // on a visible clip — if the selected clip was filtered
+        // out or deleted, fall back to the first visible one.
+        if selectedItemID == nil || !items.contains(where: { $0.id == selectedItemID }) {
+            selectedItemID = items.first?.id
+        }
+        applySelectionBorders()
     }
 
     func addRow(_ item: ClipItem, index: Int) {
@@ -3643,6 +3650,61 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         }
     }
 
+    // MARK: Keyboard navigation (roadmap #2, v2.9.0)
+    //
+    // A selection rides the horizontal feed, drawn as the theme
+    // accent outline (the first card keeps its blue "current
+    // clip" outline unless it is also the selection). Keys are
+    // handled in the local monitor below, alongside the existing
+    // Esc / ⌘F / ⌘1–9 handling: ↑/↓ always move the selection
+    // (they mean nothing in a one-line search field), ←/→ and ⌫
+    // join them only while the search is empty so text editing
+    // keeps its keys, Enter pastes, Space previews, and typing
+    // a printable character with the search unfocused jumps
+    // focus to the search field.
+    var selectedItemID: String?
+
+    func selectedItem() -> ClipItem? {
+        guard let id = selectedItemID else { return nil }
+        return visibleItems().first { $0.id == id }
+    }
+
+    func applySelectionBorders() {
+        guard let stack = listStack else { return }
+        for (i, card) in stack.arrangedSubviews.enumerated() {
+            guard let layer = card.layer else { continue }
+            if card.identifier?.rawValue == selectedItemID {
+                layer.borderColor = currentTheme.accent.cgColor
+                layer.borderWidth = 2.5
+            } else if i == 0 {
+                layer.borderColor = NSColor.controlAccentColor.cgColor
+                layer.borderWidth = 2.5
+            } else {
+                layer.borderColor = currentTheme.cardBorder.cgColor
+                layer.borderWidth = 1
+            }
+        }
+    }
+
+    func moveSelection(by delta: Int) {
+        let items = visibleItems()
+        guard !items.isEmpty else { return }
+        let current = items.firstIndex { $0.id == selectedItemID } ?? 0
+        let next = min(max(current + delta, 0), items.count - 1)
+        selectedItemID = items[next].id
+        applySelectionBorders()
+        if let card = cardView(for: items[next]) {
+            card.scrollToVisible(card.bounds)
+        }
+    }
+
+    func deleteSelected() {
+        guard let item = selectedItem() else { return }
+        store.remove(item)
+        store.save()
+        refreshList()
+    }
+
     // ⌘1–⌘9 quick-paste while the panel is open: pastes the nth
     // visible clip, matching the number badges on the rows.
     func installKeyMonitor() {
@@ -3667,6 +3729,47 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                event.keyCode == 3 {
                 self.panel.makeFirstResponder(self.searchField)
                 return nil
+            }
+            // Keyboard navigation (roadmap #2) — plain keys
+            // only; anything with ⌘/⌃/⌥ falls through to the
+            // quick-paste digits and the system.
+            if !mods.contains(.command), !mods.contains(.control), !mods.contains(.option) {
+                let searching = !(self.searchField?.stringValue ?? "").isEmpty
+                switch event.keyCode {
+                case 126: // ↑
+                    self.moveSelection(by: -1)
+                    return nil
+                case 125: // ↓
+                    self.moveSelection(by: 1)
+                    return nil
+                case 123 where !searching: // ←
+                    self.moveSelection(by: -1)
+                    return nil
+                case 124 where !searching: // →
+                    self.moveSelection(by: 1)
+                    return nil
+                case 36, 76: // Return / keypad Enter pastes the selection
+                    if let item = self.selectedItem() { self.pasteBack(item) }
+                    return nil
+                case 49 where !searching: // Space previews the selection
+                    if let item = self.selectedItem() { self.openPreview(for: item) }
+                    return nil
+                case 51, 117 where !searching: // ⌫ / forward delete
+                    self.deleteSelected()
+                    return nil
+                default:
+                    break
+                }
+                // Typing with the search unfocused jumps to it:
+                // focus the field, append the character, refilter.
+                if self.panel.firstResponder !== self.searchField?.currentEditor(),
+                   let chars = event.characters, !chars.isEmpty,
+                   chars.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }) {
+                    self.panel.makeFirstResponder(self.searchField)
+                    self.searchField.stringValue += chars
+                    self.refreshList()
+                    return nil
+                }
             }
             guard mods.contains(.command),
                   let n = digitCodes[event.keyCode] else { return event }
