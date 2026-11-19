@@ -36,8 +36,9 @@ holds whatever you copy.*
 
 ## Features
 
-- **Menu bar app, no Dock icon** — a clipboard icon in your menu bar (dimmed, with ⏸, while
-  capture is paused), and a floating panel toggled by clicking it or
+- **Menu bar app, no Dock icon** — the ClipKeep logo in your menu bar,
+  in five styles you can switch between from the ••• menu (dimmed,
+  with ⏸, while capture is paused), and a floating panel toggled by clicking it or
   pressing **⌘⇧V** from any app. The panel steps aside on its own
   when you switch to another app.
 - **Captures almost everything** — plain text, images, files copied in
@@ -101,7 +102,9 @@ holds whatever you copy.*
 - **Your history, your limit** — 200 unpinned clips by default, or
   500, 1000, or no limit. Identical copies are de-duplicated (copying
   the same thing again just brings it back to the top).
-- **Pause capture** any time from the panel.
+- **Pause capture** any time from the panel — and the paused state
+  is remembered, so quitting the app or installing an update doesn't
+  silently resume capture.
 - **Link previews** — copied links fetch the page title and preview
   image in the background and render as rich cards.
 - **Preview & edit** — the eye button on a card (or right-click →
@@ -179,7 +182,7 @@ Download button and replace the app manually one last time.
 | **+ Stack** | Add a clip to the Paste Stack |
 | **⌃⌥⌘V** | Paste the next clip from the stack, in order |
 | **✕** | Delete a clip |
-| **Clear history** | Delete everything except pinned and boarded clips |
+| **Clear history** | Delete everything except pinned and boarded clips (asks for confirmation first) |
 | **Pause capture** | Stop recording new copies until you resume |
 | **Excluded apps…** | Manage the list of apps whose copies are never recorded |
 | **Reset Panel Size** (••• menu) | Re-apply the fixed full-width size (the panel's size is locked) |
@@ -236,7 +239,7 @@ The full feasibility research is in
 
 ## How it works
 
-ClipKeep is a single-file AppKit app (`main.swift`, ~4,400 lines).
+ClipKeep is a single-file AppKit app (`main.swift`, ~4,800 lines).
 It polls the system pasteboard's change count twice a second; on a
 change it skips concealed/transient copies and excluded apps, then
 records the first matching type — file, image, colour, or text —
@@ -246,11 +249,10 @@ along with the frontmost app's name. Images are written as PNGs to
 for search. Paste-back writes the clip to the pasteboard and, with
 Accessibility permission, synthesizes ⌘V. Global hotkeys use the
 Carbon hot-key API, so no entitlement or helper is needed. Updates
-are checked against a tiny public version feed (the repo is private,
-so releases can't be read anonymously); the one-click installer
-downloads the release zip, verifies its SHA-256 against the feed,
-swaps the app bundle via a detached
-script, and relaunches.
+are checked against a tiny public version feed; the one-click
+installer downloads the release zip, verifies its SHA-256 against
+the feed, swaps the app bundle via a detached script, and
+relaunches.
 
 ## Project layout
 
