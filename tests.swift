@@ -33,6 +33,32 @@ func checkEqual<T: Equatable>(_ name: String, _ actual: T, _ expected: T) {
     check(name, actual == expected)
 }
 
+// Theme legibility helpers (Nov 18, 2026) — composite a
+// possibly translucent foreground over its background, then
+// take the WCAG contrast ratio. This is the math that would
+// have caught the Warm Tint footer bug (a white tint on
+// white cards) before it shipped.
+func contrastRatio(_ fg: NSColor, over bg: NSColor) -> Double {
+    func srgb(_ c: NSColor) -> (r: Double, g: Double, b: Double, a: Double) {
+        let c = c.usingColorSpace(.sRGB) ?? c
+        return (Double(c.redComponent), Double(c.greenComponent),
+                Double(c.blueComponent), Double(c.alphaComponent))
+    }
+    func luminance(_ r: Double, _ g: Double, _ b: Double) -> Double {
+        func lin(_ v: Double) -> Double {
+            v <= 0.03928 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+    }
+    let f = srgb(fg), b = srgb(bg)
+    let fgL = luminance(f.r * f.a + b.r * (1 - f.a),
+                        f.g * f.a + b.g * (1 - f.a),
+                        f.b * f.a + b.b * (1 - f.a))
+    let bgL = luminance(b.r, b.g, b.b)
+    let (hi, lo) = fgL >= bgL ? (fgL, bgL) : (bgL, fgL)
+    return (hi + 0.05) / (lo + 0.05)
+}
+
 @main
 struct ClipKeepTests {
     static func main() {
@@ -142,6 +168,21 @@ struct ClipKeepTests {
         check("store: the oldest unpinned clip is dropped",
               !store.items.contains { $0.id == "b" })
         UserDefaults.standard.set(200, forKey: "historyLimit")
+
+        // Theme legibility (Nov 18, 2026) — every theme's
+        // footer icon tint, accent and on-accent must stay
+        // readable against the surfaces they sit on (WCAG
+        // non-text floor, 3:1). Guards the bug class behind
+        // the Warm Tint invisible footer icons: a tint that
+        // matches its card now fails CI instead of shipping.
+        for (_, theme) in panelThemes {
+            check("theme \(theme.name): icon tint vs card >= 3:1",
+                  contrastRatio(theme.iconTint, over: theme.cardBG) >= 3.0)
+            check("theme \(theme.name): accent vs card >= 3:1",
+                  contrastRatio(theme.accent, over: theme.cardBG) >= 3.0)
+            check("theme \(theme.name): on-accent vs accent >= 3:1",
+                  contrastRatio(theme.onAccent, over: theme.accent) >= 3.0)
+        }
 
         print("—")
         if failedChecks == 0 {

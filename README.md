@@ -7,8 +7,8 @@
 <p align="center"><strong>Everything you copy, kept — privately, on your Mac.</strong></p>
 
 <p align="center">
-  <a href="https://github.com/femisowems/keepsake/actions/workflows/build.yml"><img src="https://github.com/femisowems/keepsake/actions/workflows/build.yml/badge.svg" alt="Build status"></a>
-  <a href="https://github.com/femisowems/keepsake/releases"><img src="https://img.shields.io/badge/version-v2.15.1-e4572e" alt="Latest version"></a>
+  <a href="https://github.com/femisowems/clipkeep/actions/workflows/build.yml"><img src="https://github.com/femisowems/clipkeep/actions/workflows/build.yml/badge.svg" alt="Build status"></a>
+  <a href="https://github.com/femisowems/clipkeep/releases"><img src="https://img.shields.io/badge/version-v2.15.2-e4572e" alt="Latest version"></a>
 </p>
 
 ClipKeep is a tiny, free, open-source macOS menu bar app that remembers
@@ -19,11 +19,10 @@ the same core job, in a single Swift file with **no dependencies, no
 account, no sync, no tracking, and nothing sent anywhere**. What you
 copy never leaves your Mac.
 
-*(Repository codename: **keepsake** — it keeps what you copy, for
-safekeeping. The app itself is called ClipKeep.)*
+*(It keeps what you copy, for safekeeping.)*
 
 > 🚧 **Work in progress** — ClipKeep is under active development
-> (current release: **v2.15.1**). Features, behaviour and this README
+> (current release: **v2.15.2**). Features, behaviour and this README
 > may change between versions, and things may break.
 
 ---
@@ -145,7 +144,7 @@ holds whatever you copy.*
 ## Installing
 
 1. Download the latest `ClipKeep-app-vX.Y.Z.zip` from the
-   [releases page](https://github.com/femisowems/keepsake/releases)
+   [releases page](https://github.com/femisowems/clipkeep/releases)
    and unzip it.
 2. Drag **ClipKeep.app** into your Applications folder and open it.
    The app is ad-hoc signed (not notarized), so on first launch
@@ -251,7 +250,7 @@ script, and relaunches.
 ## Project layout
 
 ```
-keepsake/
+clipkeep/
 ├── main.swift           # the whole app — capture, panel, paste-back, updates
 ├── tests.swift          # logic tests for the pure helpers (text, colour, store)
 ├── run-tests.sh         # compiles and runs the tests; CI runs it before the build

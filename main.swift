@@ -268,6 +268,7 @@ struct PanelTheme {
     let onAccent: NSColor
     let cardBG: NSColor
     let cardBorder: NSColor
+    let iconTint: NSColor
     let trackBG: NSColor
     let fieldBG: NSColor
     let fieldHoverBG: NSColor
@@ -284,6 +285,7 @@ let panelThemes: [PanelTheme] = [
                onAccent: .white,
                cardBG: .white,
                cardBorder: NSColor(red: 0.89, green: 0.89, blue: 0.91, alpha: 1),
+               iconTint: NSColor.black.withAlphaComponent(0.78),
                trackBG: NSColor(white: 0, alpha: 0.06),
                fieldBG: NSColor(white: 1, alpha: 0.55),
                fieldHoverBG: NSColor(white: 1, alpha: 0.82),
@@ -296,6 +298,7 @@ let panelThemes: [PanelTheme] = [
                accent: NSColor(red: 0.49, green: 0.48, blue: 1, alpha: 1),
                onAccent: .white,
                cardBG: NSColor(red: 0.137, green: 0.173, blue: 0.239, alpha: 1),
+               iconTint: NSColor.white.withAlphaComponent(0.85),
                cardBorder: NSColor(white: 1, alpha: 0.10),
                trackBG: NSColor(white: 1, alpha: 0.10),
                fieldBG: NSColor(white: 1, alpha: 0.09),
@@ -309,6 +312,7 @@ let panelThemes: [PanelTheme] = [
                accent: NSColor(red: 1, green: 0.624, blue: 0.263, alpha: 1),
                onAccent: NSColor(red: 0.14, green: 0.07, blue: 0.02, alpha: 1),
                cardBG: NSColor(red: 0.227, green: 0.165, blue: 0.125, alpha: 1),
+               iconTint: NSColor.white.withAlphaComponent(0.85),
                cardBorder: NSColor(white: 1, alpha: 0.10),
                trackBG: NSColor(white: 1, alpha: 0.10),
                fieldBG: NSColor(white: 1, alpha: 0.08),
@@ -322,6 +326,7 @@ let panelThemes: [PanelTheme] = [
                accent: NSColor(red: 0.176, green: 0.831, blue: 0.749, alpha: 1),
                onAccent: NSColor(red: 0.02, green: 0.19, blue: 0.16, alpha: 1),
                cardBG: NSColor(red: 0.067, green: 0.251, blue: 0.247, alpha: 1),
+               iconTint: NSColor.white.withAlphaComponent(0.85),
                cardBorder: NSColor(white: 1, alpha: 0.10),
                trackBG: NSColor(white: 1, alpha: 0.10),
                fieldBG: NSColor(white: 1, alpha: 0.08),
@@ -1468,7 +1473,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
     // MARK: Update checker + one-click install (v2.6.0)
 
-    // The keepsake repo is private, so the app cannot read its
+    // The ClipKeep repo is private, so the app cannot read its
     // releases anonymously. A tiny public gist carries the latest
     // version instead; it is bumped as part of each release.
     static let updateFeedURL = "https://gist.githubusercontent.com/femisowems/114759138a0c643983d577960363096a/raw/clipkeep-version.json"
@@ -3162,6 +3167,29 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         layer.add(radiusAnim, forKey: "shadowRadius")
         layer.shadowOpacity = toOpacity
         layer.shadowRadius = toRadius
+        // Hover wash (Nov 18, Femi's hover Loom): the shadow
+        // lift alone did not read on the frosted panel — at
+        // 0:38 in his recording a hovered card looked
+        // untouched. Blend the theme's hover wash into the
+        // card's own background as well (black 6% on Warm,
+        // white 10% on the dark themes — the wash colour's
+        // alpha is the blend fraction), animated on the same
+        // 0.15s beat, so hover registers at a glance in every
+        // theme. The copy/paste flash uses the border + a
+        // chip, so the two never fight.
+        if let wash = currentTheme.hoverWash.usingColorSpace(.sRGB),
+           let base = currentTheme.cardBG.usingColorSpace(.sRGB) {
+            let washColour = NSColor(red: wash.redComponent, green: wash.greenComponent,
+                                     blue: wash.blueComponent, alpha: 1)
+            let target = base.blendedColor(withFraction: hovering ? wash.alphaComponent : 0,
+                                           of: washColour) ?? base
+            let bgAnim = CABasicAnimation(keyPath: "backgroundColor")
+            bgAnim.fromValue = layer.presentation()?.backgroundColor ?? layer.backgroundColor
+            bgAnim.toValue = target.cgColor
+            bgAnim.duration = 0.15
+            layer.add(bgAnim, forKey: "backgroundColor")
+            layer.backgroundColor = target.cgColor
+        }
     }
 
     // Card footer actions are icon buttons (v2.4.0 button
@@ -3180,11 +3208,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         b.target = self
         b.action = action
         // Legibility (v2.11.0): the footer glyphs were the
-        // faintest thing on the card at secondaryLabelColor —
-        // labelColor at 82% reads at a glance on light and dark
-        // cards alike. The pinned state keeps the accent, delete
-        // keeps its red hover.
-        b.baseTint = active ? currentTheme.accent : NSColor.labelColor.withAlphaComponent(0.82)
+        // faintest thing on the card at secondaryLabelColor.
+        // The tint is the THEME's own static colour, never a
+        // derived system colour: labelColor.withAlphaComponent
+        // (the v2.11.0 code) resolves the dynamic colour in
+        // the APP's appearance at build time — on a dark-mode
+        // Mac it bakes white, which then draws white-on-white
+        // on Warm Tint's cards and the footer icons vanish
+        // (Femi's Loom, Nov 18). The pinned state keeps the
+        // accent, delete keeps its red hover.
+        b.baseTint = active ? currentTheme.accent : currentTheme.iconTint
         b.hoverBG = currentTheme.hoverWash
         b.pressedBG = currentTheme.pressedWash
         if danger {
@@ -3788,6 +3821,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             window.title = "Excluded apps — copies from these are never recorded"
             window.isReleasedWhenClosed = false
             window.level = .floating   // above the panel (v2.13.0) — see buildSettingsWindow
+            // Same collapse guard as the Settings window (Nov
+            // 18): fixed-size window + a scroll view with no
+            // minimum size anywhere in its sizing chain.
+            window.contentMinSize = NSSize(width: 400, height: 320)
+            window.contentMaxSize = NSSize(width: 400, height: 320)
             let content = NSView()
             window.contentView = content
 
@@ -3835,6 +3873,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                 scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
                 scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -10),
                 scroll.bottomAnchor.constraint(equalTo: addButton.topAnchor, constant: -8),
+                // Floors, matching the Settings tab (Nov 18).
+                scroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 320),
+                scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 160),
                 addButton.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
                 addButton.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10),
                 note.leadingAnchor.constraint(equalTo: addButton.trailingAnchor, constant: 10),
@@ -3858,6 +3899,37 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         return bundleID
     }
 
+    // One excluded-app row, shared by the standalone window
+    // and the Settings tab so the two lists can never drift
+    // apart: the app's own icon (Nov 18 — the rows were bare
+    // name + Remove, the only list in the app with no icons),
+    // its name, and Remove.
+    func exclusionRow(for bundleID: String) -> NSStackView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.spacing = 8
+        row.alignment = .centerY
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+            let iconView = NSImageView()
+            iconView.image = NSWorkspace.shared.icon(forFile: url.path)
+            iconView.imageScaling = .scaleProportionallyUpOrDown
+            iconView.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                iconView.widthAnchor.constraint(equalToConstant: 16),
+                iconView.heightAnchor.constraint(equalToConstant: 16)
+            ])
+            row.addArrangedSubview(iconView)
+        }
+        let label = NSTextField(labelWithString: appName(forBundleID: bundleID))
+        let remove = NSButton(title: "Remove", target: self, action: #selector(removeExcludedApp(_:)))
+        remove.bezelStyle = .rounded
+        remove.controlSize = .small
+        remove.identifier = NSUserInterfaceItemIdentifier(bundleID)
+        row.addArrangedSubview(label)
+        row.addArrangedSubview(remove)
+        return row
+    }
+
     func refreshExclusionsList() {
         guard let stack = exclusionsStack else { return }
         for view in stack.arrangedSubviews { stack.removeArrangedSubview(view); view.removeFromSuperview() }
@@ -3867,17 +3939,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             stack.addArrangedSubview(label)
         }
         for bundleID in store.excludedApps {
-            let row = NSStackView()
-            row.orientation = .horizontal
-            row.spacing = 8
-            let label = NSTextField(labelWithString: appName(forBundleID: bundleID))
-            let remove = NSButton(title: "Remove", target: self, action: #selector(removeExcludedApp(_:)))
-            remove.bezelStyle = .rounded
-            remove.controlSize = .small
-            remove.identifier = NSUserInterfaceItemIdentifier(bundleID)
-            row.addArrangedSubview(label)
-            row.addArrangedSubview(remove)
-            stack.addArrangedSubview(row)
+            stack.addArrangedSubview(exclusionRow(for: bundleID))
         }
     }
 
@@ -3937,7 +3999,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
             stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 16),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -16)
+            // Equality, not ≤ (Nov 18): with an inequality the
+            // stack's width is ambiguous at measure time, and
+            // the Updates tab's wrapping note label came out
+            // one line tall with its text clipped mid-sentence
+            // (Femi's Loom) despite empty space below it.
+            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16)
         ])
         return stack
     }
@@ -3953,6 +4020,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         // Preview and Excluded Apps all float at the panel's
         // level, and ordering front then puts them on top.
         window.level = .floating
+        // Pin the content size (Nov 18, Femi's Loom): the
+        // window is fixed-size, so AppKit takes its size from
+        // the selected tab's fitting size — and the Excluded
+        // Apps tab's fitting size collapses (its scroll view's
+        // content width is defined circularly, with no minimum
+        // anywhere). Selecting that tab shrank the whole
+        // window to a narrow black strip with every control
+        // clipped. Min = max = the intended size, so no tab
+        // can resize the window.
+        window.contentMinSize = NSSize(width: 520, height: 380)
+        window.contentMaxSize = NSSize(width: 520, height: 380)
         let tabs = NSTabView()
         window.contentView = tabs
 
@@ -4075,6 +4153,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             scroll.leadingAnchor.constraint(equalTo: excluded.leadingAnchor, constant: 10),
             scroll.trailingAnchor.constraint(equalTo: excluded.trailingAnchor, constant: -10),
             scroll.bottomAnchor.constraint(equalTo: addButton.topAnchor, constant: -8),
+            // Floors so this tab's fitting size can never
+            // collapse (see the window pin in buildSettingsWindow).
+            scroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 440),
+            scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 180),
             addButton.leadingAnchor.constraint(equalTo: excluded.leadingAnchor, constant: 10),
             addButton.bottomAnchor.constraint(equalTo: excluded.bottomAnchor, constant: -10),
             eNote.leadingAnchor.constraint(equalTo: addButton.trailingAnchor, constant: 10),
@@ -4131,17 +4213,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             stack.addArrangedSubview(label)
         }
         for bundleID in store.excludedApps {
-            let row = NSStackView()
-            row.orientation = .horizontal
-            row.spacing = 8
-            let label = NSTextField(labelWithString: appName(forBundleID: bundleID))
-            let remove = NSButton(title: "Remove", target: self, action: #selector(removeExcludedApp(_:)))
-            remove.bezelStyle = .rounded
-            remove.controlSize = .small
-            remove.identifier = NSUserInterfaceItemIdentifier(bundleID)
-            row.addArrangedSubview(label)
-            row.addArrangedSubview(remove)
-            stack.addArrangedSubview(row)
+            stack.addArrangedSubview(exclusionRow(for: bundleID))
         }
     }
 

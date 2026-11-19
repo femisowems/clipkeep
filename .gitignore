@@ -1,2 +1,6 @@
 ClipKeep.app/
 .DS_Store
+# Release zips are published to GitHub Releases, not tracked.
+*.zip
+# Test-runner build artifact (run-tests.sh).
+.tests-main.swift
