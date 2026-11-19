@@ -11,10 +11,6 @@
   <a href="https://github.com/femisowems/clipkeep/releases"><img src="https://img.shields.io/badge/version-v2.16.1-e4572e" alt="Latest version"></a>
 </p>
 
-<p align="center">
-  <a href="https://github.com/femisowems/clipkeep/releases/latest"><strong>⬇️ Download the latest release</strong></a> — macOS 11 or later, free and open source.
-</p>
-
 ClipKeep is a tiny, free, open-source macOS menu bar app that remembers
 what you copy — text, images, files and colours — so the thing you copied
 an hour ago is still one shortcut away. It was built as a free,
