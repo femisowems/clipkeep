@@ -52,22 +52,18 @@ and Ember. The fourth, Lagoon, is a deep teal.*
   when you switch to another app.
 
 ### Capture
-
 - **Captures almost everything** — plain text, images, files copied in
   Finder, and colours, recorded in the background as you copy. Each
   clip shows **which app it came from**. Copy a colour *literal* —
   `#RRGGBB`, `rgb()`, `hsl()` — and it files as a colour clip, not
   text.
-
 - **Link previews** — copied links fetch the page title and preview
   image in the background and render as rich cards.
-
 - **Pause capture** any time from the panel — and the paused state
   is remembered, so quitting the app or installing an update doesn't
   silently resume capture.
 
 ### Organize and find
-
 - **A horizontal feed of cards** — 300pt cards in a bottom-anchored,
   full-width strip, pinned clips first, the selected card outlined.
   Every card has a coloured header band per type (text cards take
@@ -76,12 +72,10 @@ and Ember. The fourth, Lagoon, is a deep teal.*
   source app's icon in a badge, relative times ("4 hours ago"), and
   Paste-style footers — character counts, image dimensions, file
   sizes.
-
 - **Filter tabs with live counts** — All / Text / Links / Images /
   Files / Colours as pill tabs with SF Symbol icons and count badges.
   The last-used tab is remembered, Colours can sort by hue, and each
   tab has its own empty state.
-
 - **Search that sees inside images** — image clips are run through
   on-device text recognition (Apple's Vision framework) when they're
   captured, so you can find a screenshot by the words in it. Image
@@ -90,17 +84,14 @@ and Ember. The fourth, Lagoon, is a deep teal.*
   covers text, file names and source apps, and filters by source app
   and recency (Today / 7 / 30 days) sit next to the search field.
   **⌘F** jumps to search; **Esc** clears it, then closes the panel.
-
 - **Pinboards** — file keepers onto named boards (snippets, templates,
   colours). Pinned and boarded clips never expire; a board picker
   filters the list to one board at a time.
-
 - **Preview & edit** — the eye button on a card (or right-click →
   Preview / Edit) opens any clip full-size; text clips can be edited
   and saved in place.
 
 ### Paste it back
-
 - **Paste back, three ways**
   - Double-click any clip to copy it back to the clipboard — the
     panel closes once the copy lands. (A single click just
@@ -113,25 +104,21 @@ and Ember. The fourth, Lagoon, is a deep teal.*
     panel is open (the cards show their numbers).
   - **Paste Stack** — queue clips with **+ Stack**, then paste them
     in order with **⌃⌥⌘V**, built for forms and repetitive entry.
-
 - **Confirmation you can see** — copying or pasting flashes a
   "✓ Copied" chip and an accent outline on the card itself, and the
   menu-bar icon flashes green "✓ Copied" / "✓ Pasted", so actions
   with no card on screen (Preview copies, the Paste Stack) confirm
   too.
-
 - **Right-click menu** on every card: Paste, Copy, Preview / Edit,
   Pin, Move to Board, Add to Paste Stack, Delete — colour cards add
   Copy as RGB / Copy as HSL, text cards add a **Transform** submenu
   (see Quick actions), and link cards add Copy as Markdown Link.
-
 - **Quick actions** (v2.8.0) — the Transform submenu pastes a text
   clip transformed: as Plain Text, UPPERCASE, lowercase, Title
   Case, or Trimmed (every line trimmed, blank runs collapsed).
   Pretty-print JSON and Extract Links appear only when they apply
   to the clip. **Copy as Markdown Link** copies `[page title](url)`
   for a link clip, using its fetched preview title when present.
-
 - **Keyboard-first navigation** (v2.9.0) — a selection (accent
   outline) rides the feed: **↑/↓** move it any time, **←/→** too
   while the search is empty, **Enter** pastes it, **Space**
@@ -139,7 +126,6 @@ and Ember. The fourth, Lagoon, is a deep teal.*
   unfocused jumps straight into the search field.
 
 ### Yours to control
-
 - **Private by design**
   - Copies marked *concealed* or *transient* (how password managers
     mark theirs) are **never recorded**.
@@ -149,21 +135,17 @@ and Ember. The fourth, Lagoon, is a deep teal.*
     requests the app ever makes are fetching a copied link's page
     title/preview image and checking a public version feed for
     updates — nothing about your history is sent anywhere.
-
 - **Your history, your limit** — 200 unpinned clips by default, or
   500, 1000, or no limit. Identical copies are de-duplicated (copying
   the same thing again just brings it back to the top).
-
 - **Four panel themes** — Warm Tint (light, frosted), Midnight,
   Ember and Lagoon (dark), switchable from the ••• menu's Theme
   submenu and remembered between launches. A **Reduce Transparency**
   toggle makes the theme tint fully opaque.
-
 - **Settings window** (v2.7.0) — General (pause, history limit,
   panel size, clear history), Appearance (theme, menu bar icon, Reduce
   Transparency), Updates (version, status, check now) and Excluded
   Apps tabs, from the ••• menu (**⌘,**) or the menu-bar icon's right-click menu.
-
 - **One-click updates** (v2.6.0) — when a new version is out, a slim
   strip appears under the search row (never in your feed). **Install**
   downloads it in the background with a progress bar, swaps the app
@@ -194,6 +176,7 @@ it as described below.
 **Watch the install** (1 min 42 s) — the whole first-time install, including the one-time macOS security approval:
 
 ![clipkeep-install-guide](https://github.com/user-attachments/assets/96b52e4f-2e7e-4e4f-b775-e8f7f102adc1)
+
 ▶ [Watch the same walkthrough as a video with narration (1:42)](https://github.com/user-attachments/assets/a2e6c924-8250-4ac5-8b7b-904a82f902b3)
 
 1. Download the latest `ClipKeep-app-vX.Y.Z.zip` from the
