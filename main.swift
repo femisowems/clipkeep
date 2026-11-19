@@ -1592,6 +1592,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     // centerPanelContent() can balance them by measurement.
     var panelTopConstraint: NSLayoutConstraint!
     var panelBottomConstraint: NSLayoutConstraint!
+    var stackBarTopConstraint: NSLayoutConstraint!
+    var stackBarZeroHeight: NSLayoutConstraint!
     var feedClipView: NSView!
     private var downloadTask: URLSessionDownloadTask?
     private var downloadSession: URLSession?
@@ -2563,7 +2565,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             filterBar.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor, constant: Self.spaceMargin),
             filterBar.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -Self.spaceMargin),
 
-            stackBar.topAnchor.constraint(equalTo: filterBar.bottomAnchor, constant: Self.spaceRowGap),
             stackBar.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: Self.spaceMargin),
             stackBar.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -Self.spaceMargin),
 
@@ -2597,6 +2598,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         panelTopConstraint.isActive = true
         panelBottomConstraint = scrollView.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -Self.spaceMargin)
         panelBottomConstraint.isActive = true
+
+        // Stored for the Paste Stack collapse (v2.15.4): with an
+        // empty stack the bar takes no height and no top gap, so
+        // the feed starts 24pt below the filter row instead of
+        // reserving ~44pt for a bar that isn't visible. The stack
+        // starts empty, hence the collapsed initial state;
+        // refreshList keeps both in sync with stackIDs.
+        stackBarTopConstraint = stackBar.topAnchor.constraint(equalTo: filterBar.bottomAnchor, constant: 0)
+        stackBarTopConstraint.isActive = true
+        stackBarZeroHeight = stackBar.heightAnchor.constraint(equalToConstant: 0)
+        stackBarZeroHeight.isActive = true
 
         // Apply the saved theme (Warm Tint on first run); this
         // also does the first refreshList with themed cards.
@@ -2679,7 +2691,28 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     private func defaultPanelFrame() -> NSRect {
         if let screen = NSScreen.main {
             let f = screen.frame, vf = screen.visibleFrame
-            return NSRect(x: f.minX, y: vf.minY, width: f.width, height: defaultPanelHeight)
+            var y = vf.minY
+            // An auto-hidden Dock is NOT excluded from the visible
+            // frame, so a bottom-anchored panel sits flush with
+            // the screen's bottom edge and the Dock slides in over
+            // its bottom strip — since v2.15.3 let a card fill the
+            // feed, the tallest card's footer ended up a couple of
+            // points from the Dock icons (v2.15.4). When the Dock
+            // lives on the bottom edge and auto-hides, lift the
+            // panel by the Dock's shown height plus a small air
+            // gap. A permanently visible Dock is already excluded
+            // from vf, and a side Dock needs no lift, so both keep
+            // the plain anchor.
+            let dock = UserDefaults(suiteName: "com.apple.dock")
+            if (dock?.string(forKey: "orientation") ?? "bottom") == "bottom",
+               dock?.bool(forKey: "autohide") ?? false {
+                let rawTile = dock?.double(forKey: "tilesize") ?? 0
+                let tile: CGFloat = rawTile > 0 ? CGFloat(rawTile) : 48
+                // Shown height is roughly the tile plus ~26pt of
+                // background padding and edge gap; add 8pt of air.
+                y = max(y, f.minY + tile + 34)
+            }
+            return NSRect(x: f.minX, y: y, width: f.width, height: defaultPanelHeight)
         }
         return NSRect(x: 0, y: 0, width: 1100, height: defaultPanelHeight)
     }
@@ -2978,6 +3011,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         // Drop stack entries whose clips are gone.
         stackIDs = stackIDs.filter { id in store.items.contains { $0.id == id } }
         stackBar.isHidden = stackIDs.isEmpty
+        if stackBarTopConstraint != nil {
+            // v2.15.4: an empty stack also collapses the bar's
+            // height and top gap (see buildPanel).
+            stackBarTopConstraint.constant = stackIDs.isEmpty ? 0 : Self.spaceRowGap
+            stackBarZeroHeight.isActive = stackIDs.isEmpty
+        }
         if !stackIDs.isEmpty {
             stackLabel.stringValue = "Paste Stack: \(stackIDs.count) queued — ⌃⌥⌘V pastes the next one"
         }
