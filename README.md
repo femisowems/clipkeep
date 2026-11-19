@@ -243,7 +243,7 @@ The full feasibility research is in
 
 ## How it works
 
-ClipKeep is a single-file AppKit app (`main.swift`, ~4,800 lines).
+ClipKeep is a single-file AppKit app (`main.swift`).
 It polls the system pasteboard's change count twice a second; on a
 change it skips concealed/transient copies and excluded apps, then
 records the first matching type — file, image, colour, or text —
