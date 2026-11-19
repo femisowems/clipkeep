@@ -911,7 +911,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     var listStack: NSStackView!
     var scrollView: NSScrollView!
     var scrollFade: PassthroughView!
-    var emptyLabel: NSTextField!
+    // Designed empty state (v2.16.0): a centred stack — logo,
+    // headline, subtext, hint rows — replacing the single grey
+    // emptyLabel line. refreshList fills it in per mode and
+    // restyles the hint chips for the current theme.
+    var emptyStateView: NSView!
+    var emptyHeadline: NSTextField!
+    var emptySubtext: NSTextField!
+    var emptyHints: NSStackView!
+    var emptyChips: [(view: NSView, label: NSTextField)] = []
     var exclusionsWindow: NSWindow?
     var exclusionsStack: NSStackView?
     var settingsWindow: NSWindow?
@@ -958,6 +966,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+
+        // Purge the retired panel-frame keys (v2.16.0): frame
+        // persistence ended in v2.9.1, but existing installs
+        // still carry V3–V6 saved frames in their preferences.
+        // Nothing reads them — delete on sight.
+        for key in ["ClipKeepPanelFrameV3", "ClipKeepPanelFrameV4",
+                    "ClipKeepPanelFrameV5", "ClipKeepPanelFrameV6"] {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
@@ -1319,6 +1336,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     // are rendered from the bundle's own app icon, so they can
     // never drift from the real logo; the glyph is drawn as a
     // template so it tints like a native menu-bar icon.
+    // The five menu-bar icon treatments (v2.15.3), defined once
+    // (v2.16.0): the ••• submenu and Settings → Appearance both
+    // build from this list, so the two can never drift apart.
+    static let menuBarIconStyles: [(title: String, id: String)] = [
+        ("Logo", "logo"), ("Logo (tight crop)", "logoCrop"),
+        ("Glyph (monochrome)", "glyph"), ("Logo (greyscale)", "grey"),
+        ("Logo (greyscale, reversed)", "greyReversed")
+    ]
+
     var menuBarIconStyle: String {
         UserDefaults.standard.string(forKey: "ClipKeepMenuBarIcon") ?? "logoCrop"
     }
@@ -2450,12 +2476,73 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             clipView.widthAnchor.constraint(greaterThanOrEqualTo: scrollView.contentView.widthAnchor)
         ])
 
-        emptyLabel = NSTextField(labelWithString: "Nothing here yet — copy something and it will show up.")
-        emptyLabel.textColor = .secondaryLabelColor
-        emptyLabel.maximumNumberOfLines = 3
-        emptyLabel.alignment = .center
-        emptyLabel.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(emptyLabel)
+        // Designed empty state (v2.16.0, design C — Femi's pick
+        // from the Nov 18 mocks): the app logo, the headline
+        // "Your clipboard, remembered", and three getting-
+        // started hint rows with keycap chips. refreshList
+        // switches the content by mode — a tab/search view with
+        // no matches swaps the headline and drops the hints.
+        // Replaces the single grey label that stood here before.
+        let emptyIcon = NSImageView()
+        emptyIcon.image = NSApp.applicationIconImage
+        emptyIcon.imageScaling = .scaleProportionallyUpOrDown
+        emptyIcon.widthAnchor.constraint(equalToConstant: 60).isActive = true
+        emptyIcon.heightAnchor.constraint(equalToConstant: 60).isActive = true
+
+        emptyHeadline = NSTextField(labelWithString: "Your clipboard, remembered")
+        emptyHeadline.font = NSFont.systemFont(ofSize: 17, weight: .semibold)
+        emptyHeadline.textColor = .labelColor
+        emptyHeadline.alignment = .center
+
+        emptySubtext = NSTextField(labelWithString: "")
+        emptySubtext.font = NSFont.systemFont(ofSize: 12.5)
+        emptySubtext.textColor = .secondaryLabelColor
+        emptySubtext.alignment = .center
+        emptySubtext.maximumNumberOfLines = 3
+
+        // One hint row: a fixed-width keycap chip + one line.
+        func hintRow(_ chip: String, _ text: String) -> NSStackView {
+            let chipLabel = NSTextField(labelWithString: chip)
+            chipLabel.font = NSFont.systemFont(ofSize: 11.5, weight: .medium)
+            chipLabel.alignment = .center
+            chipLabel.translatesAutoresizingMaskIntoConstraints = false
+            let chipView = NSView()
+            chipView.wantsLayer = true
+            chipView.layer?.cornerRadius = 6
+            chipView.translatesAutoresizingMaskIntoConstraints = false
+            chipView.widthAnchor.constraint(equalToConstant: 64).isActive = true
+            chipView.heightAnchor.constraint(equalToConstant: 24).isActive = true
+            chipView.addSubview(chipLabel)
+            chipLabel.centerXAnchor.constraint(equalTo: chipView.centerXAnchor).isActive = true
+            chipLabel.centerYAnchor.constraint(equalTo: chipView.centerYAnchor).isActive = true
+            emptyChips.append((view: chipView, label: chipLabel))
+            let label = NSTextField(labelWithString: text)
+            label.font = NSFont.systemFont(ofSize: 12.5)
+            label.textColor = .secondaryLabelColor
+            let row = NSStackView(views: [chipView, label])
+            row.orientation = .horizontal
+            row.alignment = .centerY
+            row.spacing = 12
+            return row
+        }
+        emptyHints = NSStackView(views: [
+            hintRow("copy", "Anything you copy is kept here automatically"),
+            hintRow("⌘⇧V", "Open ClipKeep from anywhere"),
+            hintRow("⌘1–9", "Paste a recent clip straight back")
+        ])
+        emptyHints.orientation = .vertical
+        emptyHints.alignment = .leading
+        emptyHints.spacing = 10
+
+        let emptyStack = NSStackView(views: [emptyIcon, emptyHeadline, emptySubtext, emptyHints])
+        emptyStack.orientation = .vertical
+        emptyStack.alignment = .centerX
+        emptyStack.spacing = 12
+        emptyStack.setCustomSpacing(16, after: emptyIcon)
+        emptyStack.setCustomSpacing(18, after: emptyHeadline)
+        emptyStateView = emptyStack
+        emptyStateView.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(emptyStateView)
 
         // Paste-style overflow menu: everything that used to live
         // in a footer button row (pause, history limit, excluded
@@ -2588,9 +2675,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             scrollView.widthAnchor.constraint(greaterThanOrEqualToConstant: 420),
             scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 200),
 
-            emptyLabel.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
-            emptyLabel.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
-            emptyLabel.widthAnchor.constraint(lessThanOrEqualTo: scrollView.widthAnchor, constant: -48)
+            emptyStateView.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
+            emptyStateView.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
+            emptyStateView.widthAnchor.constraint(lessThanOrEqualTo: scrollView.widthAnchor, constant: -48)
         ])
 
         // Stored so the strip can open/close by changing two
@@ -2685,10 +2772,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     // constant (Nov 17 sizing audit) the literal 520 was
     // hard-coded in four places that had to be changed together.
     private let defaultPanelHeight: CGFloat = 520
-
-    // The retired frame-persistence key (saving ended in v2.9.1);
-    // kept only so Reset Panel Size can clear a stale saved frame.
-    private let panelFrameKey = "ClipKeepPanelFrameV6"
 
     // The one and only panel frame: full physical width,
     // defaultPanelHeight tall, sitting on the bottom of the main
@@ -3047,14 +3130,38 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         // the strip under the search row (v2.6.0).
 
         let items = visibleItems()
-        emptyLabel.isHidden = !items.isEmpty
+        emptyStateView.isHidden = !items.isEmpty
         if items.isEmpty {
-            // Say WHY the list is empty. The old single message
-            // ("copy something…") also appeared when filters were
-            // hiding a full history, which read as lost data.
+            // Say WHY the list is empty (v2.16.0: the designed
+            // empty state — design C — fills the views; before,
+            // a single grey label carried all three messages,
+            // and the plain "copy something…" one also appeared
+            // when filters were hiding a full history, which
+            // read as lost data). Three modes: no history at all
+            // gets the headline + getting-started hints; a tab
+            // that has never held a clip says so in its own
+            // terms; a search/filter with no matches says that.
+            // The hint chips are restyled here, with the list,
+            // so they always match the current theme.
+            for chip in emptyChips {
+                chip.view.layer?.backgroundColor = currentTheme.dark
+                    ? NSColor(white: 1, alpha: 0.10).cgColor
+                    : NSColor(white: 0, alpha: 0.06).cgColor
+                chip.view.layer?.borderWidth = 1
+                chip.view.layer?.borderColor = currentTheme.dark
+                    ? NSColor(white: 1, alpha: 0.14).cgColor
+                    : NSColor(white: 0, alpha: 0.10).cgColor
+                chip.label.textColor = currentTheme.dark
+                    ? NSColor(white: 1, alpha: 0.85)
+                    : NSColor(white: 0, alpha: 0.75)
+            }
             if store.items.isEmpty {
-                emptyLabel.stringValue = "Nothing here yet — copy something and it will show up."
+                emptyHeadline.stringValue = "Your clipboard, remembered"
+                emptySubtext.isHidden = true
+                emptyHints.isHidden = false
             } else {
+                emptyHints.isHidden = true
+                emptySubtext.isHidden = false
                 // If the current tab has never held a clip, say so
                 // in the tab's own terms instead of blaming filters.
                 let type = pillTabs?.selectedType ?? "all"
@@ -3065,9 +3172,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                                 "file": "No files yet — copy a file in Finder and it will show up here.",
                                 "color": "No colours yet — copy a colour, or a #hex / rgb() string, and it will show up here."]
                 if inTab == 0, let hint = tabHints[type] {
-                    emptyLabel.stringValue = hint + "\n\(store.items.count) clip\(store.items.count == 1 ? "" : "s") in history — the other tabs still show them."
+                    emptyHeadline.stringValue = "Nothing here yet"
+                    emptySubtext.stringValue = hint + "\n\(store.items.count) clip\(store.items.count == 1 ? "" : "s") in history — the other tabs still show them."
                 } else {
-                    emptyLabel.stringValue = "Nothing matches the current search or filters.\n\(store.items.count) clip\(store.items.count == 1 ? "" : "s") in history — clear the search or widen the filters to see them."
+                    emptyHeadline.stringValue = "Nothing matches"
+                    emptySubtext.stringValue = "\(store.items.count) clip\(store.items.count == 1 ? "" : "s") in history — clear the search or widen the filters to see them."
                 }
             }
         }
@@ -3994,9 +4103,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         menu.addItem(themeItem)
         let iconItem = NSMenuItem(title: "Menu Bar Icon", action: nil, keyEquivalent: "")
         let iconMenu = NSMenu()
-        for (title, id) in [("Logo", "logo"), ("Logo (tight crop)", "logoCrop"),
-                            ("Glyph (monochrome)", "glyph"), ("Logo (greyscale)", "grey"),
-                            ("Logo (greyscale, reversed)", "greyReversed")] {
+        for (title, id) in Self.menuBarIconStyles {
             let mi = NSMenuItem(title: title, action: #selector(menuBarIconChosen(_:)), keyEquivalent: "")
             mi.target = self
             mi.representedObject = id
@@ -4022,9 +4129,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     }
 
     @objc func resetPanelSize() {
-        // The frame is fixed in v2.9.1, so this simply re-applies
-        // it (and clears any stale pre-v2.9.1 saved frame).
-        UserDefaults.standard.removeObject(forKey: panelFrameKey)
+        // The frame is fixed since v2.9.1, so this simply
+        // re-applies it. (It also used to clear the retired
+        // saved-frame key; v2.16.0 removed that plumbing — the
+        // stale V3–V6 keys are purged at launch instead.)
         applyFixedPanelFrame()
     }
 
@@ -4206,6 +4314,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    // Settings live-sync (v2.16.0): the controls used to refresh
+    // only when the window was (re)opened, so changing pause,
+    // theme, the menu-bar icon or Reduce Transparency from a
+    // menu while Settings sat open left it showing stale values
+    // until it was closed and reopened. Re-sync whenever the
+    // window becomes key — clicking back into it is exactly
+    // when a stale value would be read. (The Settings window
+    // shares this delegate with the panel; the panel's own
+    // delegate methods guard on the window's identity, and so
+    // does this one.)
+    func windowDidBecomeKey(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+              window === settingsWindow else { return }
+        syncSettingsControls()
+    }
+
     private func settingsStack(in view: NSView) -> NSStackView {
         let stack = NSStackView()
         stack.orientation = .vertical
@@ -4231,6 +4355,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "ClipKeep Settings"
         window.isReleasedWhenClosed = false
+        window.delegate = self
         // Above the panel (v2.13.0, Femi's screenshot): the
         // panel floats (.floating), so a normal-level window
         // opens UNDER it wherever they overlap — Settings,
@@ -4300,12 +4425,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         a.addArrangedSubview(themePopup)
         a.addArrangedSubview(NSTextField(labelWithString: "Menu bar icon:"))
         let iconPopup = NSPopUpButton()
-        // The same five treatments as ••• → Menu Bar Icon
-        // (v2.15.7, at Femi's request — the choice lived only in
-        // the menu; Settings → Appearance is where he'd look).
-        let iconStyles = [("Logo", "logo"), ("Logo (tight crop)", "logoCrop"),
-                          ("Glyph (monochrome)", "glyph"), ("Logo (greyscale)", "grey"),
-                          ("Logo (greyscale, reversed)", "greyReversed")]
+        // The same five treatments as ••• → Menu Bar Icon, from
+        // the one shared list (v2.15.7, at Femi's request — the
+        // choice lived only in the menu; Settings → Appearance
+        // is where he'd look; the list was unified in v2.16.0).
+        let iconStyles = Self.menuBarIconStyles
         iconPopup.addItems(withTitles: iconStyles.map { $0.0 })
         for (i, style) in iconStyles.enumerated() {
             iconPopup.item(at: i)?.representedObject = style.1
@@ -4836,7 +4960,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     func registerHotKeys() {
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
                                       eventKind: UInt32(kEventHotKeyPressed))
-        InstallEventHandler(GetApplicationEventTarget(), { _, event, _ -> OSStatus in
+        let handlerStatus = InstallEventHandler(GetApplicationEventTarget(), { _, event, _ -> OSStatus in
             var hkID = EventHotKeyID()
             if let ev = event {
                 _ = GetEventParameter(ev, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil,
@@ -4851,12 +4975,35 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         }, 1, &eventType, nil, nil)
 
         let panelHotKey = EventHotKeyID(signature: OSType(0x434B5054), id: 1) // 'CKPT'
-        RegisterEventHotKey(UInt32(kVK_ANSI_V), UInt32(cmdKey | shiftKey),
+        let panelStatus = RegisterEventHotKey(UInt32(kVK_ANSI_V), UInt32(cmdKey | shiftKey),
                             panelHotKey, GetApplicationEventTarget(), 0, &hotKeyRef)
 
         let stackHotKey = EventHotKeyID(signature: OSType(0x434B5053), id: 2) // 'CKPS'
-        RegisterEventHotKey(UInt32(kVK_ANSI_V), UInt32(cmdKey | optionKey | controlKey),
+        let stackStatus = RegisterEventHotKey(UInt32(kVK_ANSI_V), UInt32(cmdKey | optionKey | controlKey),
                             stackHotKey, GetApplicationEventTarget(), 0, &stackHotKeyRef)
+
+        // Check the results (v2.16.0): these used to be ignored,
+        // so a failed registration — another app already owning
+        // ⌘⇧V system-wide is the realistic cause — left the
+        // shortcut silently dead, with nothing anywhere to say
+        // why. Log it, and tell the user once, after launch
+        // settles. A failed handler install kills both hotkeys;
+        // a failed registration kills only its own.
+        if handlerStatus != noErr || panelStatus != noErr || stackStatus != noErr {
+            NSLog("ClipKeep: hot key registration failed (handler \(handlerStatus), panel \(panelStatus), stack \(stackStatus))")
+            var failed: [String] = []
+            if handlerStatus != noErr || panelStatus != noErr { failed.append("⌘⇧V (open ClipKeep)") }
+            if handlerStatus != noErr || stackStatus != noErr { failed.append("⌃⌥⌘V (paste the next stack clip)") }
+            let names = failed.joined(separator: " and ")
+            DispatchQueue.main.async {
+                NSApp.activate(ignoringOtherApps: true)
+                let alert = NSAlert()
+                alert.messageText = "A ClipKeep shortcut couldn't be registered"
+                alert.informativeText = "macOS refused \(names) — another app may already be using it. You can still open ClipKeep from its menu bar icon."
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
+            }
+        }
     }
 }
 
