@@ -213,6 +213,11 @@ designed around that limit instead:
   a clip on your phone and copying it back. Sync starts with a
   Google Drive folder; end-to-end encrypted sync is the longer-term
   plan. Password-manager and other sensitive clips never sync.
+- **Profiles and sync** — an optional ClipKeep profile is planned
+  alongside the companion: sign in on your devices and your history
+  stays in step across Mac and phone, with end-to-end encrypted
+  sync as the design goal. Profiles are opt-in — the Mac app stays
+  fully local and account-free if you never turn sync on.
 - **Android first** — built for the phone its author actually
   carries; the iPhone version follows the same deliberate-capture
   design (share sheet, Shortcuts, the system paste control).
@@ -278,4 +283,4 @@ Support/ClipKeep` and everything is gone.
 
 Built by [Femi Sowemimo](https://github.com/femisowems) (StarterDev).
 
-Built with encouragement from my younger sis, Fikky. Yes, your name is in the README now. You're welcome. 😄💛
+Built with encouragement from my younger sis, Fikky. Yes, your name is in the README now. You're welcome. 😄
