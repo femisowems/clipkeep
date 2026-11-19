@@ -934,7 +934,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     var timer: Timer?
     var lastChangeCount = 0
     var selfWriteChangeCount = -1
-    var capturePaused = false
+    // Pause is persisted (v2.15.5): it used to live in memory
+    // only, so quitting — or the updater's swap-and-relaunch —
+    // silently resumed capture. The menu-bar icon already shows
+    // the state at a glance (dim + ⏸ via refreshStatusItem,
+    // which runs at launch), so a remembered pause stays visible.
+    var capturePaused: Bool {
+        get { UserDefaults.standard.bool(forKey: "ClipKeepCapturePaused") }
+        set { UserDefaults.standard.set(newValue, forKey: "ClipKeepCapturePaused") }
+    }
     var hotKeyRef: EventHotKeyRef?
     var stackHotKeyRef: EventHotKeyRef?
     var stackIDs: [String] = []   // Paste Stack queue, first = next out
@@ -3090,6 +3098,35 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         }
     }
 
+    // Deterministic height for a wrapping card label (v2.15.5).
+    // AppKit's fitting height for these labels is not stable: on
+    // some rebuilds it prices the text at a sliver width and the
+    // card balloons to its line maximum — Femi's Nov 18 Loom shows
+    // two identical 6-character clips swapping heights on every
+    // filter toggle, re-rolled per rebuild. Measuring the string
+    // directly at the label's real width (268) with a layout
+    // manager takes the guesswork out: same inputs, same height,
+    // every single rebuild.
+    func cardLabelHeight(for text: String, font: NSFont, maxLines: Int) -> CGFloat {
+        let storage = NSTextStorage(string: text, attributes: [.font: font])
+        let container = NSTextContainer(size: NSSize(width: 268, height: .greatestFiniteMagnitude))
+        container.lineFragmentPadding = 0
+        let layout = NSLayoutManager()
+        layout.addTextContainer(container)
+        storage.addLayoutManager(layout)
+        layout.ensureLayout(for: container)
+        var lines = 0
+        var glyphIndex = 0
+        while glyphIndex < layout.numberOfGlyphs {
+            var lineRange = NSRange()
+            layout.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: &lineRange)
+            glyphIndex = NSMaxRange(lineRange)
+            lines += 1
+        }
+        let clamped = min(maxLines, max(1, lines))
+        return ceil(CGFloat(clamped) * layout.defaultLineHeight(for: font)) + 1
+    }
+
     func addRow(_ item: ClipItem, index: Int) {
         let row = rowView(for: item, index: index)
         listStack.addArrangedSubview(row)
@@ -3625,6 +3662,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                     // and its "height" balloons — the cavern cards
                     // in Femi's Nov 18 screenshot.
                     t.preferredMaxLayoutWidth = 268
+                    // Same treatment as the text label (v2.15.5):
+                    // exact height from the string, ≤38 cap as a
+                    // guard (the title truncates at 2 lines).
+                    t.heightAnchor.constraint(lessThanOrEqualToConstant: 38).isActive = true
+                    t.heightAnchor.constraint(equalToConstant: cardLabelHeight(for: cleanLinkTitle(title), font: NSFont.systemFont(ofSize: 12.5, weight: .semibold), maxLines: 2)).isActive = true
                     body.addArrangedSubview(t)
                     fullWidth(t)
                 }
@@ -3641,6 +3683,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                 label.maximumNumberOfLines = 5
                 label.lineBreakMode = .byTruncatingTail
                 label.preferredMaxLayoutWidth = 268   // see the link-title note above
+                // Height is set exactly, from the string itself
+                // (v2.15.5, see cardLabelHeight): the label
+                // truncates at 5 lines, and AppKit's fitting
+                // height for it proved unstable — the "cavern
+                // cards" (identical 6-character clips rendering
+                // at different heights, Nov 18). The ≤88 cap stays
+                // as a guard; the exact height does the real work.
+                label.heightAnchor.constraint(lessThanOrEqualToConstant: 88).isActive = true
+                label.heightAnchor.constraint(equalToConstant: cardLabelHeight(for: item.preview, font: NSFont.systemFont(ofSize: 13), maxLines: 5)).isActive = true
                 body.addArrangedSubview(label)
                 fullWidth(label)
             }
@@ -3874,6 +3925,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     }
 
     @objc func clearHistory() {
+        // Confirmation (v2.15.5): this deletes every unpinned
+        // clip and its image files, irreversibly, and it sits one
+        // click away in Settings and the ••• menu — one stray
+        // click used to wipe the history with no way back.
+        let alert = NSAlert()
+        alert.messageText = "Clear history?"
+        alert.informativeText = "All unpinned clips will be deleted, including their image files. Pinned and boarded clips are kept. This can't be undone."
+        alert.addButton(withTitle: "Clear History")
+        alert.addButton(withTitle: "Cancel")
+        if panel.isVisible { panel.makeKeyAndOrderFront(nil) }
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
         store.clearHistory()
         refreshList()
     }
