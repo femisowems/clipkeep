@@ -11,6 +11,10 @@
   <a href="https://github.com/femisowems/clipkeep/releases"><img src="https://img.shields.io/badge/version-v2.16.1-e4572e" alt="Latest version"></a>
 </p>
 
+<p align="center">
+  <a href="https://github.com/femisowems/clipkeep/releases/latest"><strong>⬇️ Download the latest release</strong></a> — macOS 11 or later, free and open source.
+</p>
+
 ClipKeep is a tiny, free, open-source macOS menu bar app that remembers
 what you copy — text, images, files and colours — so the thing you copied
 an hour ago is still one shortcut away. It was built as a free,
@@ -34,6 +38,11 @@ clips from a developer's day (a code snippet, a pull-request link, a
 design colour, a diagram, build output, a spec file). The real thing
 holds whatever you copy.*
 
+![The ClipKeep panel in the Warm Tint, Midnight and Ember themes](panel-themes.png)
+
+*The same panel in three of its four themes — Warm Tint, Midnight
+and Ember. The fourth, Lagoon, is a deep teal.*
+
 ## Features
 
 - **Menu bar app, no Dock icon** — the ClipKeep logo in your menu bar,
@@ -41,11 +50,24 @@ holds whatever you copy.*
   with ⏸, while capture is paused), and a floating panel toggled by clicking it or
   pressing **⌘⇧V** from any app. The panel steps aside on its own
   when you switch to another app.
+
+### Capture
+
 - **Captures almost everything** — plain text, images, files copied in
   Finder, and colours, recorded in the background as you copy. Each
   clip shows **which app it came from**. Copy a colour *literal* —
   `#RRGGBB`, `rgb()`, `hsl()` — and it files as a colour clip, not
   text.
+
+- **Link previews** — copied links fetch the page title and preview
+  image in the background and render as rich cards.
+
+- **Pause capture** any time from the panel — and the paused state
+  is remembered, so quitting the app or installing an update doesn't
+  silently resume capture.
+
+### Organize and find
+
 - **A horizontal feed of cards** — 300pt cards in a bottom-anchored,
   full-width strip, pinned clips first, the selected card outlined.
   Every card has a coloured header band per type (text cards take
@@ -54,10 +76,12 @@ holds whatever you copy.*
   source app's icon in a badge, relative times ("4 hours ago"), and
   Paste-style footers — character counts, image dimensions, file
   sizes.
+
 - **Filter tabs with live counts** — All / Text / Links / Images /
   Files / Colours as pill tabs with SF Symbol icons and count badges.
   The last-used tab is remembered, Colours can sort by hue, and each
   tab has its own empty state.
+
 - **Search that sees inside images** — image clips are run through
   on-device text recognition (Apple's Vision framework) when they're
   captured, so you can find a screenshot by the words in it. Image
@@ -66,9 +90,17 @@ holds whatever you copy.*
   covers text, file names and source apps, and filters by source app
   and recency (Today / 7 / 30 days) sit next to the search field.
   **⌘F** jumps to search; **Esc** clears it, then closes the panel.
+
 - **Pinboards** — file keepers onto named boards (snippets, templates,
   colours). Pinned and boarded clips never expire; a board picker
   filters the list to one board at a time.
+
+- **Preview & edit** — the eye button on a card (or right-click →
+  Preview / Edit) opens any clip full-size; text clips can be edited
+  and saved in place.
+
+### Paste it back
+
 - **Paste back, three ways**
   - Double-click any clip to copy it back to the clipboard — the
     panel closes once the copy lands. (A single click just
@@ -81,15 +113,33 @@ holds whatever you copy.*
     panel is open (the cards show their numbers).
   - **Paste Stack** — queue clips with **+ Stack**, then paste them
     in order with **⌃⌥⌘V**, built for forms and repetitive entry.
+
 - **Confirmation you can see** — copying or pasting flashes a
   "✓ Copied" chip and an accent outline on the card itself, and the
   menu-bar icon flashes green "✓ Copied" / "✓ Pasted", so actions
   with no card on screen (Preview copies, the Paste Stack) confirm
   too.
-- **Four panel themes** — Warm Tint (light, frosted), Midnight,
-  Ember and Lagoon (dark), switchable from the ••• menu's Theme
-  submenu and remembered between launches. A **Reduce Transparency**
-  toggle makes the theme tint fully opaque.
+
+- **Right-click menu** on every card: Paste, Copy, Preview / Edit,
+  Pin, Move to Board, Add to Paste Stack, Delete — colour cards add
+  Copy as RGB / Copy as HSL, text cards add a **Transform** submenu
+  (see Quick actions), and link cards add Copy as Markdown Link.
+
+- **Quick actions** (v2.8.0) — the Transform submenu pastes a text
+  clip transformed: as Plain Text, UPPERCASE, lowercase, Title
+  Case, or Trimmed (every line trimmed, blank runs collapsed).
+  Pretty-print JSON and Extract Links appear only when they apply
+  to the clip. **Copy as Markdown Link** copies `[page title](url)`
+  for a link clip, using its fetched preview title when present.
+
+- **Keyboard-first navigation** (v2.9.0) — a selection (accent
+  outline) rides the feed: **↑/↓** move it any time, **←/→** too
+  while the search is empty, **Enter** pastes it, **Space**
+  previews it, **⌫** deletes it, and typing with the search
+  unfocused jumps straight into the search field.
+
+### Yours to control
+
 - **Private by design**
   - Copies marked *concealed* or *transient* (how password managers
     mark theirs) are **never recorded**.
@@ -99,36 +149,21 @@ holds whatever you copy.*
     requests the app ever makes are fetching a copied link's page
     title/preview image and checking a public version feed for
     updates — nothing about your history is sent anywhere.
+
 - **Your history, your limit** — 200 unpinned clips by default, or
   500, 1000, or no limit. Identical copies are de-duplicated (copying
   the same thing again just brings it back to the top).
-- **Pause capture** any time from the panel — and the paused state
-  is remembered, so quitting the app or installing an update doesn't
-  silently resume capture.
-- **Link previews** — copied links fetch the page title and preview
-  image in the background and render as rich cards.
-- **Preview & edit** — the eye button on a card (or right-click →
-  Preview / Edit) opens any clip full-size; text clips can be edited
-  and saved in place.
-- **Right-click menu** on every card: Paste, Copy, Preview / Edit,
-  Pin, Move to Board, Add to Paste Stack, Delete — colour cards add
-  Copy as RGB / Copy as HSL, text cards add a **Transform** submenu
-  (see Quick actions), and link cards add Copy as Markdown Link.
-- **Quick actions** (v2.8.0) — the Transform submenu pastes a text
-  clip transformed: as Plain Text, UPPERCASE, lowercase, Title
-  Case, or Trimmed (every line trimmed, blank runs collapsed).
-  Pretty-print JSON and Extract Links appear only when they apply
-  to the clip. **Copy as Markdown Link** copies `[page title](url)`
-  for a link clip, using its fetched preview title when present.
-- **Keyboard-first navigation** (v2.9.0) — a selection (accent
-  outline) rides the feed: **↑/↓** move it any time, **←/→** too
-  while the search is empty, **Enter** pastes it, **Space**
-  previews it, **⌫** deletes it, and typing with the search
-  unfocused jumps straight into the search field.
+
+- **Four panel themes** — Warm Tint (light, frosted), Midnight,
+  Ember and Lagoon (dark), switchable from the ••• menu's Theme
+  submenu and remembered between launches. A **Reduce Transparency**
+  toggle makes the theme tint fully opaque.
+
 - **Settings window** (v2.7.0) — General (pause, history limit,
   panel size, clear history), Appearance (theme, menu bar icon, Reduce
   Transparency), Updates (version, status, check now) and Excluded
   Apps tabs, from the ••• menu (**⌘,**) or the menu-bar icon's right-click menu.
+
 - **One-click updates** (v2.6.0) — when a new version is out, a slim
   strip appears under the search row (never in your feed). **Install**
   downloads it in the background with a progress bar, swaps the app
@@ -136,13 +171,24 @@ holds whatever you copy.*
   dismisses that version. Checking manually when you're current
   flashes "✓ You're up to date". Since v2.6.1 the download is
   verified against the feed's SHA-256 checksum before installing.
-
 ## Requirements
 
 - macOS 11 (Big Sur) or later
 - To build from source: the free **Xcode Command Line Tools** (for
   `swiftc`). You do **not** need the full Xcode app, an Apple Developer
   account, or the App Store.
+
+## Building from source
+
+```bash
+git clone https://github.com/femisowems/clipkeep.git
+cd clipkeep
+./run-tests.sh   # optional — runs the logic tests first
+./build.sh       # builds ClipKeep.app in this folder
+```
+
+Then drag `ClipKeep.app` into your Applications folder and launch
+it as described below.
 
 ## Installing
 **Watch the install** (1 min 42 s) — the whole first-time install, including the one-time macOS security approval:
@@ -271,6 +317,8 @@ clipkeep/
 ├── MOBILE-RESEARCH.md   # feasibility research for the future mobile version
 ├── AppIcon.icns         # bundled app icon (all macOS sizes)
 ├── AppIcon-1024.png     # icon source artwork
+├── panel-warm.png       # the panel illustration (Warm Tint)
+├── panel-themes.png     # the panel in Warm Tint, Midnight and Ember
 ├── LICENSE              # MIT
 └── README.md
 ```
