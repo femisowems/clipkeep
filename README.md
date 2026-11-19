@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/femisowems/clipkeep/actions/workflows/build.yml"><img src="https://github.com/femisowems/clipkeep/actions/workflows/build.yml/badge.svg" alt="Build status"></a>
-  <a href="https://github.com/femisowems/clipkeep/releases"><img src="https://img.shields.io/badge/version-v2.16.0-e4572e" alt="Latest version"></a>
+  <a href="https://github.com/femisowems/clipkeep/releases"><img src="https://img.shields.io/badge/version-v2.16.1-e4572e" alt="Latest version"></a>
 </p>
 
 ClipKeep is a tiny, free, open-source macOS menu bar app that remembers
@@ -22,7 +22,7 @@ copy never leaves your Mac.
 *(It keeps what you copy, for safekeeping.)*
 
 > 🚧 **Work in progress** — ClipKeep is under active development
-> (current release: **v2.16.0**). Features, behaviour and this README
+> (current release: **v2.16.1**). Features, behaviour and this README
 > may change between versions, and things may break.
 
 ---

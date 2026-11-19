@@ -3764,7 +3764,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                     t.font = NSFont.systemFont(ofSize: 12.5, weight: .semibold)
                     t.textColor = .labelColor
                     t.maximumNumberOfLines = 2
-                    t.lineBreakMode = .byTruncatingTail
+                    t.lineBreakMode = .byWordWrapping
                     // Wrapping labels inside the horizontal feed
                     // need their layout width up front (268 = card
                     // 300 − 32 insets, the card padding since
@@ -3775,7 +3775,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                     t.preferredMaxLayoutWidth = 268
                     // Same treatment as the text label (v2.15.5):
                     // exact height from the string, ≤38 cap as a
-                    // guard (the title truncates at 2 lines).
+                    // guard (the title wraps to at most 2 lines).
                     t.heightAnchor.constraint(lessThanOrEqualToConstant: 38).isActive = true
                     t.heightAnchor.constraint(equalToConstant: cardLabelHeight(for: cleanLinkTitle(title), font: NSFont.systemFont(ofSize: 12.5, weight: .semibold), maxLines: 2)).isActive = true
                     body.addArrangedSubview(t)
@@ -3792,15 +3792,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                 label.font = NSFont.systemFont(ofSize: 13)
                 label.textColor = .labelColor
                 label.maximumNumberOfLines = 5
-                label.lineBreakMode = .byTruncatingTail
+                label.lineBreakMode = .byWordWrapping
                 label.preferredMaxLayoutWidth = 268   // see the link-title note above
                 // Height is set exactly, from the string itself
                 // (v2.15.5, see cardLabelHeight): the label
-                // truncates at 5 lines, and AppKit's fitting
+                // wraps at 5 lines, and AppKit's fitting
                 // height for it proved unstable — the "cavern
                 // cards" (identical 6-character clips rendering
                 // at different heights, Nov 18). The ≤88 cap stays
                 // as a guard; the exact height does the real work.
+                // The line-break mode must stay .byWordWrapping
+                // (v2.16.1): with .byTruncatingTail the cell
+                // truncated each hard line instead of wrapping,
+                // so the display never matched the measured
+                // height — Femi's Nov 19 screenshot showed
+                // 248/194/96-character clips as one truncated
+                // line each inside 5/4/2-line-tall cards.
                 label.heightAnchor.constraint(lessThanOrEqualToConstant: 88).isActive = true
                 label.heightAnchor.constraint(equalToConstant: cardLabelHeight(for: item.preview, font: NSFont.systemFont(ofSize: 13), maxLines: 5)).isActive = true
                 body.addArrangedSubview(label)
