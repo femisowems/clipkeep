@@ -38,11 +38,6 @@ clips from a developer's day (a code snippet, a pull-request link, a
 design colour, a diagram, build output, a spec file). The real thing
 holds whatever you copy.*
 
-![The ClipKeep panel in the Warm Tint, Midnight and Ember themes](panel-themes.png)
-
-*The same panel in three of its four themes — Warm Tint, Midnight
-and Ember. The fourth, Lagoon, is a deep teal.*
-
 ## Features
 
 - **Menu bar app, no Dock icon** — the ClipKeep logo in your menu bar,
@@ -301,7 +296,6 @@ clipkeep/
 ├── AppIcon.icns         # bundled app icon (all macOS sizes)
 ├── AppIcon-1024.png     # icon source artwork
 ├── panel-warm.png       # the panel illustration (Warm Tint)
-├── panel-themes.png     # the panel in Warm Tint, Midnight and Ember
 ├── LICENSE              # MIT
 └── README.md
 ```
