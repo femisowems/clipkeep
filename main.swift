@@ -3077,7 +3077,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         // and the anti-balloon guard still holds: no card can
         // exceed what is actually visible.
         row.heightAnchor.constraint(lessThanOrEqualTo: scrollView.contentView.heightAnchor,
-                                    constant: -2 * spaceFeedInset).isActive = true
+                                    constant: -2 * Self.spaceFeedInset).isActive = true
         // Card borders are owned by applySelectionBorders —
         // one outline, for the selection only (v2.13.0).
     }
