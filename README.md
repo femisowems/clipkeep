@@ -147,7 +147,8 @@ holds whatever you copy.*
 ## Installing
 **Watch the install** (1 min 42 s) — the whole first-time install, including the one-time macOS security approval:
 
-https://github.com/user-attachments/assets/a2e6c924-8250-4ac5-8b7b-904a82f902b3
+![clipkeep-install-guide](https://github.com/user-attachments/assets/96b52e4f-2e7e-4e4f-b775-e8f7f102adc1)
+▶ [Watch the same walkthrough as a video with narration (1:42)](https://github.com/user-attachments/assets/a2e6c924-8250-4ac5-8b7b-904a82f902b3)
 
 1. Download the latest `ClipKeep-app-vX.Y.Z.zip` from the
    [releases page](https://github.com/femisowems/clipkeep/releases)
