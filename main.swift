@@ -3109,7 +3109,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     // every single rebuild.
     func cardLabelHeight(for text: String, font: NSFont, maxLines: Int) -> CGFloat {
         let storage = NSTextStorage(string: text, attributes: [.font: font])
-        let container = NSTextContainer(size: NSSize(width: 268, height: .greatestFiniteMagnitude))
+        let container = NSTextContainer(size: NSSize(width: 268, height: CGFloat.greatestFiniteMagnitude))
         container.lineFragmentPadding = 0
         let layout = NSLayoutManager()
         layout.addTextContainer(container)
