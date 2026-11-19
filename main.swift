@@ -298,8 +298,8 @@ let panelThemes: [PanelTheme] = [
                accent: NSColor(red: 0.49, green: 0.48, blue: 1, alpha: 1),
                onAccent: .white,
                cardBG: NSColor(red: 0.137, green: 0.173, blue: 0.239, alpha: 1),
-               iconTint: NSColor.white.withAlphaComponent(0.85),
                cardBorder: NSColor(white: 1, alpha: 0.10),
+               iconTint: NSColor.white.withAlphaComponent(0.85),
                trackBG: NSColor(white: 1, alpha: 0.10),
                fieldBG: NSColor(white: 1, alpha: 0.09),
                fieldHoverBG: NSColor(white: 1, alpha: 0.16),
@@ -312,8 +312,8 @@ let panelThemes: [PanelTheme] = [
                accent: NSColor(red: 1, green: 0.624, blue: 0.263, alpha: 1),
                onAccent: NSColor(red: 0.14, green: 0.07, blue: 0.02, alpha: 1),
                cardBG: NSColor(red: 0.227, green: 0.165, blue: 0.125, alpha: 1),
-               iconTint: NSColor.white.withAlphaComponent(0.85),
                cardBorder: NSColor(white: 1, alpha: 0.10),
+               iconTint: NSColor.white.withAlphaComponent(0.85),
                trackBG: NSColor(white: 1, alpha: 0.10),
                fieldBG: NSColor(white: 1, alpha: 0.08),
                fieldHoverBG: NSColor(white: 1, alpha: 0.15),
@@ -326,8 +326,8 @@ let panelThemes: [PanelTheme] = [
                accent: NSColor(red: 0.176, green: 0.831, blue: 0.749, alpha: 1),
                onAccent: NSColor(red: 0.02, green: 0.19, blue: 0.16, alpha: 1),
                cardBG: NSColor(red: 0.067, green: 0.251, blue: 0.247, alpha: 1),
-               iconTint: NSColor.white.withAlphaComponent(0.85),
                cardBorder: NSColor(white: 1, alpha: 0.10),
+               iconTint: NSColor.white.withAlphaComponent(0.85),
                trackBG: NSColor(white: 1, alpha: 0.10),
                fieldBG: NSColor(white: 1, alpha: 0.08),
                fieldHoverBG: NSColor(white: 1, alpha: 0.15),
@@ -3181,7 +3181,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
            let base = currentTheme.cardBG.usingColorSpace(.sRGB) {
             let washColour = NSColor(red: wash.redComponent, green: wash.greenComponent,
                                      blue: wash.blueComponent, alpha: 1)
-            let target = base.blendedColor(withFraction: hovering ? wash.alphaComponent : 0,
+            let target = base.blended(withFraction: hovering ? wash.alphaComponent : 0,
                                            of: washColour) ?? base
             let bgAnim = CABasicAnimation(keyPath: "backgroundColor")
             bgAnim.fromValue = layer.presentation()?.backgroundColor ?? layer.backgroundColor
