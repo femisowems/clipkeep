@@ -918,6 +918,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     var settingsPauseCheckbox: NSButton?
     var settingsLimitPopup: NSPopUpButton?
     var settingsThemePopup: NSPopUpButton?
+    var settingsIconPopup: NSPopUpButton?
     var settingsRTCheckbox: NSButton?
     var settingsClickCheckbox: NSButton?
 
@@ -1311,8 +1312,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
     // Menu-bar icon style (v2.15.3). Femi asked for the logo in
     // the menu bar; shown five treatments as mocks, he chose to
-    // ship all five as options (••• menu → Menu Bar Icon) rather
-    // than pick one. Default is the tight crop — the treatment
+    // ship all five as options (••• menu → Menu Bar Icon, and
+    // Settings → Appearance since v2.15.7) rather than pick one.
+    // Default is the tight crop — the treatment
     // that stays legible at menu-bar size. The colour treatments
     // are rendered from the bundle's own app icon, so they can
     // never drift from the real logo; the glyph is drawn as a
@@ -4188,7 +4190,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     // One Settings window (roadmap #14, v2.7.0) gathering what
     // used to live only in the ••• menu: General (pause, history
     // limit, panel size, clear history), Appearance (theme,
-    // Reduce Transparency), Updates (version, check now, status),
+    // menu bar icon, Reduce Transparency), Updates (version,
+    // check now, status),
     // and Excluded Apps (the same list the standalone window
     // edits — both views write the one store list). Every control
     // calls the existing actions/keys, so the menus and Settings
@@ -4295,6 +4298,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         themePopup.action = #selector(settingsThemeChanged(_:))
         settingsThemePopup = themePopup
         a.addArrangedSubview(themePopup)
+        a.addArrangedSubview(NSTextField(labelWithString: "Menu bar icon:"))
+        let iconPopup = NSPopUpButton()
+        // The same five treatments as ••• → Menu Bar Icon
+        // (v2.15.7, at Femi's request — the choice lived only in
+        // the menu; Settings → Appearance is where he'd look).
+        let iconStyles = [("Logo", "logo"), ("Logo (tight crop)", "logoCrop"),
+                          ("Glyph (monochrome)", "glyph"), ("Logo (greyscale)", "grey"),
+                          ("Logo (greyscale, reversed)", "greyReversed")]
+        iconPopup.addItems(withTitles: iconStyles.map { $0.0 })
+        for (i, style) in iconStyles.enumerated() {
+            iconPopup.item(at: i)?.representedObject = style.1
+        }
+        iconPopup.target = self
+        iconPopup.action = #selector(settingsIconChanged(_:))
+        settingsIconPopup = iconPopup
+        a.addArrangedSubview(iconPopup)
         let rt = NSButton(checkboxWithTitle: "Reduce Transparency (solid panel background)", target: self, action: #selector(settingsRTToggled(_:)))
         settingsRTCheckbox = rt
         a.addArrangedSubview(rt)
@@ -4399,6 +4418,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                 popup.selectItem(at: i)
             }
         }
+        if let popup = settingsIconPopup {
+            for i in 0..<popup.numberOfItems where (popup.item(at: i)?.representedObject as? String) == menuBarIconStyle {
+                popup.selectItem(at: i)
+            }
+        }
         settingsRTCheckbox?.state = UserDefaults.standard.bool(forKey: "ClipKeepReduceTransparency") ? .on : .off
         refreshSettingsUpdateStatus()
         refreshSettingsExclusionsList()
@@ -4442,6 +4466,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
     @objc func settingsThemeChanged(_ sender: NSPopUpButton) {
         if let mi = sender.selectedItem { themeChosen(mi) }
+    }
+
+    @objc func settingsIconChanged(_ sender: NSPopUpButton) {
+        if let mi = sender.selectedItem { menuBarIconChosen(mi) }
     }
 
     @objc func settingsRTToggled(_ sender: NSButton) {

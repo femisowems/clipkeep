@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/femisowems/clipkeep/actions/workflows/build.yml"><img src="https://github.com/femisowems/clipkeep/actions/workflows/build.yml/badge.svg" alt="Build status"></a>
-  <a href="https://github.com/femisowems/clipkeep/releases"><img src="https://img.shields.io/badge/version-v2.15.6-e4572e" alt="Latest version"></a>
+  <a href="https://github.com/femisowems/clipkeep/releases"><img src="https://img.shields.io/badge/version-v2.15.7-e4572e" alt="Latest version"></a>
 </p>
 
 ClipKeep is a tiny, free, open-source macOS menu bar app that remembers
@@ -22,7 +22,7 @@ copy never leaves your Mac.
 *(It keeps what you copy, for safekeeping.)*
 
 > 🚧 **Work in progress** — ClipKeep is under active development
-> (current release: **v2.15.6**). Features, behaviour and this README
+> (current release: **v2.15.7**). Features, behaviour and this README
 > may change between versions, and things may break.
 
 ---
@@ -126,7 +126,7 @@ holds whatever you copy.*
   previews it, **⌫** deletes it, and typing with the search
   unfocused jumps straight into the search field.
 - **Settings window** (v2.7.0) — General (pause, history limit,
-  panel size, clear history), Appearance (theme, Reduce
+  panel size, clear history), Appearance (theme, menu bar icon, Reduce
   Transparency), Updates (version, status, check now) and Excluded
   Apps tabs, from the ••• menu (**⌘,**) or the menu-bar icon's right-click menu.
 - **One-click updates** (v2.6.0) — when a new version is out, a slim
