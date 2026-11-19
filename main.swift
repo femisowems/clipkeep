@@ -13,6 +13,7 @@ import ApplicationServices
 import Vision
 import UniformTypeIdentifiers
 import ImageIO
+import CoreImage
 
 // MARK: - Model
 
@@ -1285,9 +1286,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     // text temporarily and restores through here.
     func refreshStatusItem() {
         guard let button = statusItem?.button else { return }
-        if let img = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: "ClipKeep"),
+        if let img = menuBarIconImage() {
+            button.image = img
+        } else if let img = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: "ClipKeep"),
            let configured = img.withSymbolConfiguration(
                NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)) {
+            // Fallback only — the SF Symbol the logo replaced in v2.15.3.
             configured.isTemplate = true
             button.image = configured
         }
@@ -1295,6 +1299,92 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         button.title = capturePaused ? "⏸" : ""
         button.attributedTitle = NSAttributedString(string: button.title)
         button.alphaValue = capturePaused ? 0.45 : 1.0
+    }
+
+    // Menu-bar icon style (v2.15.3). Femi asked for the logo in
+    // the menu bar; shown five treatments as mocks, he chose to
+    // ship all five as options (••• menu → Menu Bar Icon) rather
+    // than pick one. Default is the tight crop — the treatment
+    // that stays legible at menu-bar size. The colour treatments
+    // are rendered from the bundle's own app icon, so they can
+    // never drift from the real logo; the glyph is drawn as a
+    // template so it tints like a native menu-bar icon.
+    var menuBarIconStyle: String {
+        UserDefaults.standard.string(forKey: "ClipKeepMenuBarIcon") ?? "logoCrop"
+    }
+
+    @objc func menuBarIconChosen(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        UserDefaults.standard.set(id, forKey: "ClipKeepMenuBarIcon")
+        refreshStatusItem()
+    }
+
+    private var menuBarIconCache: [String: NSImage] = [:]
+    func menuBarIconImage() -> NSImage? {
+        let style = menuBarIconStyle
+        if let cached = menuBarIconCache[style] { return cached }
+        let size = NSSize(width: 18, height: 18)
+        let image = style == "glyph" ? glyphMenuBarImage(size: size)
+                                     : logoMenuBarImage(style: style, size: size)
+        if let image { menuBarIconCache[style] = image }
+        return image
+    }
+
+    private func logoMenuBarImage(style: String, size: NSSize) -> NSImage? {
+        guard let appIcon = NSApp.applicationIconImage else { return nil }
+        var source = appIcon
+        var srcRect = NSRect(origin: .zero, size: appIcon.size)
+        if style == "logoCrop" {
+            // Centre 76% — the cards and pin fill the frame and
+            // the icon's dark background mostly falls away (mock B).
+            let inset = appIcon.size.width * 0.12
+            srcRect = NSRect(x: inset, y: inset,
+                             width: appIcon.size.width - 2 * inset,
+                             height: appIcon.size.height - 2 * inset)
+        } else if style == "grey" || style == "greyReversed" {
+            guard let mono = greyscaleImage(appIcon, invert: style == "greyReversed") else { return nil }
+            source = mono
+            srcRect = NSRect(origin: .zero, size: mono.size)
+        }
+        let out = NSImage(size: size)
+        out.lockFocus()
+        let rect = NSRect(origin: .zero, size: size)
+        NSBezierPath(roundedRect: rect, xRadius: 4, yRadius: 4).addClip()
+        source.draw(in: rect, from: srcRect, operation: .copy, fraction: 1)
+        out.unlockFocus()
+        out.isTemplate = false
+        return out
+    }
+
+    private func greyscaleImage(_ img: NSImage, invert: Bool) -> NSImage? {
+        guard let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        var ci = CIImage(cgImage: cg).applyingFilter("CIPhotoEffectMono")
+        if invert { ci = ci.applyingFilter("CIColorInvert") }
+        guard let out = CIContext().createCGImage(ci, from: ci.extent) else { return nil }
+        return NSImage(cgImage: out, size: img.size)
+    }
+
+    private func glyphMenuBarImage(size: NSSize) -> NSImage {
+        // The stacked-cards mark as a one-colour template: back
+        // card offset up-right, front card below-left, the pin a
+        // filled dot on the front card's top-left corner (mock C).
+        let img = NSImage(size: size, flipped: true) { rect in
+            let s = rect.width / 18
+            NSColor.black.setStroke()
+            NSColor.black.setFill()
+            let back = NSBezierPath(roundedRect: NSRect(x: 5.5 * s, y: 1.5 * s, width: 11.5 * s, height: 11.5 * s),
+                                    xRadius: 2.6 * s, yRadius: 2.6 * s)
+            back.lineWidth = 1.5 * s
+            back.stroke()
+            let front = NSBezierPath(roundedRect: NSRect(x: 1.5 * s, y: 5 * s, width: 11.5 * s, height: 11.5 * s),
+                                     xRadius: 2.6 * s, yRadius: 2.6 * s)
+            front.lineWidth = 1.5 * s
+            front.stroke()
+            NSBezierPath(ovalIn: NSRect(x: 0.6 * s, y: 4.1 * s, width: 3.4 * s, height: 3.4 * s)).fill()
+            return true
+        }
+        img.isTemplate = true
+        return img
     }
 
     private var menuFlashGeneration = 0
@@ -2977,7 +3067,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         // the cap sits just above that; the wrapping labels also
         // carry preferredMaxLayoutWidth now (see rowView), which
         // keeps their fitting heights honest in the first place.
-        row.heightAnchor.constraint(lessThanOrEqualToConstant: 312).isActive = true
+        // v2.15.3: the fixed 312 cap became the feed's own height.
+        // Femi: mid-length clips were cut off on the card and the
+        // capped card + feed insets could exceed the viewport, so
+        // the panel scrolled vertically. The cap is now the clip
+        // view's height minus the feed insets — a card may use
+        // every point the panel has, the document can never be
+        // taller than the viewport (no vertical scroll, ever),
+        // and the anti-balloon guard still holds: no card can
+        // exceed what is actually visible.
+        row.heightAnchor.constraint(lessThanOrEqualTo: scrollView.contentView.heightAnchor,
+                                    constant: -2 * spaceFeedInset).isActive = true
         // Card borders are owned by applySelectionBorders —
         // one outline, for the selection only (v2.13.0).
     }
@@ -3789,6 +3889,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         }
         themeItem.submenu = themeMenu
         menu.addItem(themeItem)
+        let iconItem = NSMenuItem(title: "Menu Bar Icon", action: nil, keyEquivalent: "")
+        let iconMenu = NSMenu()
+        for (title, id) in [("Logo", "logo"), ("Logo (tight crop)", "logoCrop"),
+                            ("Glyph (monochrome)", "glyph"), ("Logo (greyscale)", "grey"),
+                            ("Logo (greyscale, reversed)", "greyReversed")] {
+            let mi = NSMenuItem(title: title, action: #selector(menuBarIconChosen(_:)), keyEquivalent: "")
+            mi.target = self
+            mi.representedObject = id
+            mi.state = menuBarIconStyle == id ? .on : .off
+            iconMenu.addItem(mi)
+        }
+        iconItem.submenu = iconMenu
+        menu.addItem(iconItem)
         let rtItem = NSMenuItem(title: "Reduce Transparency", action: #selector(toggleReduceTransparency), keyEquivalent: "")
         rtItem.target = self
         rtItem.state = UserDefaults.standard.bool(forKey: "ClipKeepReduceTransparency") ? .on : .off
@@ -4552,7 +4665,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                 case 49 where !searching: // Space previews the selection
                     if let item = self.selectedItem() { self.openPreview(for: item) }
                     return nil
-                case 51, 117 where !searching: // ⌫ / forward delete
+                case 51 where !searching, 117 where !searching: // ⌫ / forward delete — the where is repeated per pattern: a single trailing where binds only to the last pattern (the CI warning), which left ⌫ ungated while searching
                     self.deleteSelected()
                     return nil
                 default:
