@@ -4520,6 +4520,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                 if self.panel.frame != self.defaultPanelFrame() {
                     self.applyFixedPanelFrame()
                 }
+                // First-show rebuild (v2.15.6): the refreshList
+                // above runs before the window is on screen, so on
+                // the FIRST open after a launch the rows are built
+                // and measured against frames that don't exist yet
+                // — Femi's Nov 18 screenshot showed the result:
+                // unselected cards with the header band pushed
+                // ~62pt down and the row stretched, while every
+                // later rebuild (filter toggles) rendered fine.
+                // Rebuilding once the panel is actually displayed
+                // reproduces that known-good state; on later opens
+                // it's an identical, invisible rebuild (the launch
+                // intro's overlay covers the swap on first open).
+                self.refreshList()
             }
             NSApp.activate(ignoringOtherApps: true)
             panel.makeFirstResponder(searchField)
