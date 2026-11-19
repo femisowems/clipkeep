@@ -175,7 +175,7 @@ struct ClipKeepTests {
         // non-text floor, 3:1). Guards the bug class behind
         // the Warm Tint invisible footer icons: a tint that
         // matches its card now fails CI instead of shipping.
-        for (_, theme) in panelThemes {
+        for theme in panelThemes {
             check("theme \(theme.name): icon tint vs card >= 3:1",
                   contrastRatio(theme.iconTint, over: theme.cardBG) >= 3.0)
             check("theme \(theme.name): accent vs card >= 3:1",
