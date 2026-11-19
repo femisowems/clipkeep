@@ -277,3 +277,5 @@ Support/ClipKeep` and everything is gone.
 ---
 
 Built by [Femi Sowemimo](https://github.com/femisowems) (StarterDev).
+
+Built with encouragement from my younger sis, Fikky. Yes, your name is in the README now. You're welcome. 😄
