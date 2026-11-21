@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/femisowems/clipkeep/actions/workflows/build.yml"><img src="https://github.com/femisowems/clipkeep/actions/workflows/build.yml/badge.svg" alt="Build status"></a>
-  <a href="https://github.com/femisowems/clipkeep/releases"><img src="https://img.shields.io/badge/version-v2.16.3-e4572e" alt="Latest version"></a>
+  <a href="https://github.com/femisowems/clipkeep/releases"><img src="https://img.shields.io/badge/version-v2.16.4-e4572e" alt="Latest version"></a>
   <a href="https://github.com/femisowems/clipkeep/releases"><img src="https://img.shields.io/github/downloads/femisowems/clipkeep/total" alt="Downloads"></a>
   <a href="https://github.com/femisowems/clipkeep/blob/main/LICENSE"><img src="https://img.shields.io/github/license/femisowems/clipkeep" alt="License"></a>
 </p>
@@ -24,7 +24,7 @@ copy never leaves your Mac.
 *(It keeps what you copy, for safekeeping.)*
 
 > 🚧 **Work in progress** — ClipKeep is under active development
-> (current release: **v2.16.3**). Features, behaviour and this README
+> (current release: **v2.16.4**). Features, behaviour and this README
 > may change between versions, and things may break.
 
 ---
@@ -116,7 +116,9 @@ holds whatever you copy.*
   outline) rides the feed: **↑/↓** move it any time, **←/→** too
   while the search is empty, **Enter** pastes it, **Space**
   previews it, **⌫** deletes it, and typing with the search
-  unfocused jumps straight into the search field.
+  unfocused jumps straight into the search field. The panel
+  opens with the feed focused, not the search field — **⌘F**
+  focuses the search field when you want it.
 
 ### Yours to control
 - **Private by design**

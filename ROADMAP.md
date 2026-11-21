@@ -131,6 +131,9 @@ Status (Nov 18): the launch click in item 1 is confirmed from Femi's Loom — cl
 **Double-click pastes (v2.16.3)**
 23. Put your cursor in a text field in another app, open the panel and double-click a clip: the panel closes and the clip lands in the field — no separate ⌘V — with a "✓ Pasted" flash on the card and menu bar. Right-click a card → Copy still copies only: the panel closes after the "✓ Copied" flash and nothing is pasted. (Supersedes the double-click half of step 3.)
 
+**Panel opens without grabbing search focus (v2.16.4)**
+24. Open the panel: no cursor sits in the search box — the feed holds focus. Double-click a clip with your cursor waiting in a text field elsewhere: it pastes cleanly (the v2.16.3 check, now without the focus fight Femi reported). Start typing with the panel open: the letters still land in the search box and the list filters. ⌘F still jumps to the search box when you want it.
+
 ## Queued — approved Nov 18, 2026 (Femi: "rely on your judgement")
 - Theme-legibility contrast checks added to the test suite (36 → 48 checks) — DONE, shipped inside v2.15.2.
 - The v2.15.3 number went to Femi's Nov 18 evening asks (card heights + menu-bar icon) — see the Shipped log. The `case 51, 117` key-code warning was fixed inside it (the where clause now gates each delete key separately — the single trailing where bound only to forward-delete, leaving ⌫ ungated while searching).

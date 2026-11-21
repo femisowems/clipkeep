@@ -4706,7 +4706,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                 self.refreshList()
             }
             NSApp.activate(ignoringOtherApps: true)
-            panel.makeFirstResponder(searchField)
+            // v2.16.4: the panel opens with the FEED holding
+            // focus, not the search field — Femi reported the
+            // search field grabbing focus on open fought the
+            // double-click paste (v2.16.3). Nothing is lost:
+            // typing still jumps to search via the key
+            // monitor, and ⌘F focuses the field explicitly.
+            panel.makeFirstResponder(scrollView)
             playIntroIfNeeded()
         }
     }
