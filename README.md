@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/femisowems/clipkeep/actions/workflows/build.yml"><img src="https://github.com/femisowems/clipkeep/actions/workflows/build.yml/badge.svg" alt="Build status"></a>
-  <a href="https://github.com/femisowems/clipkeep/releases"><img src="https://img.shields.io/badge/version-v2.16.4-e4572e" alt="Latest version"></a>
+  <a href="https://github.com/femisowems/clipkeep/releases"><img src="https://img.shields.io/badge/version-v2.16.5-e4572e" alt="Latest version"></a>
   <a href="https://github.com/femisowems/clipkeep/releases"><img src="https://img.shields.io/github/downloads/femisowems/clipkeep/total" alt="Downloads"></a>
   <a href="https://github.com/femisowems/clipkeep/blob/main/LICENSE"><img src="https://img.shields.io/github/license/femisowems/clipkeep" alt="License"></a>
 </p>
@@ -24,7 +24,7 @@ copy never leaves your Mac.
 *(It keeps what you copy, for safekeeping.)*
 
 > 🚧 **Work in progress** — ClipKeep is under active development
-> (current release: **v2.16.4**). Features, behaviour and this README
+> (current release: **v2.16.5**). Features, behaviour and this README
 > may change between versions, and things may break.
 
 ---
@@ -89,7 +89,10 @@ holds whatever you copy.*
   - Double-click any clip to paste it straight into the app
     underneath — ClipKeep copies it, closes the panel and,
     with Accessibility permission, presses ⌘V for you so it
-    lands where your cursor is. (A single click just
+    lands where your cursor is. If that permission is missing,
+    ClipKeep says so: it copies, flashes "✓ Copied" instead of
+    claiming a paste, and offers to open the Accessibility
+    settings (once per launch, never nagging). (A single click just
     selects it.) **⌘1–⌘9** and Enter paste the same way;
     to copy a clip *without* pasting it, right-click the
     card → Copy.

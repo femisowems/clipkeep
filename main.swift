@@ -993,6 +993,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         registerHotKeys()
         installKeyMonitor()
 
+        // Track the app in front before ClipKeep activates
+        // (v2.16.5): pasteBack hands focus back to it
+        // explicitly before sending ⌘V, instead of trusting
+        // that closing the panel reactivates it in time.
+        if let front = NSWorkspace.shared.frontmostApplication,
+           front.bundleIdentifier != Bundle.main.bundleIdentifier {
+            lastExternalApp = front
+        }
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil, queue: .main) { [weak self] note in
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  app.bundleIdentifier != Bundle.main.bundleIdentifier else { return }
+            self?.lastExternalApp = app
+        }
+
         lastChangeCount = NSPasteboard.general.changeCount
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.pollClipboard()
@@ -1445,8 +1461,27 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         }
     }
 
+    // The last app in front that wasn't ClipKeep itself
+    // (v2.16.5) — pasteBack reactivates it explicitly before
+    // sending ⌘V. Tracked from launch via
+    // NSWorkspace.didActivateApplicationNotification.
+    var lastExternalApp: NSRunningApplication?
+    // Process-lifetime: the Accessibility explanation is
+    // shown at most once per launch, never nagged.
+    var pastePermissionPromptShown = false
+
     func pasteBack(_ item: ClipItem, fromStack: Bool = false) {
         writeToPasteboard(item)
+        // v2.16.5: a paste is only "✓ Pasted" when the ⌘V
+        // keystroke will actually be sent. macOS gates that
+        // keystroke on Accessibility trust; without it the
+        // old code skipped the keystroke silently and still
+        // flashed "✓ Pasted" — Femi's Nov 21 Loom showed the
+        // result: panel closes, nothing lands, no clue why.
+        // Untrusted now flashes "✓ Copied" honestly and
+        // surfaces the permission fix (once per launch).
+        let trusted = AXIsProcessTrusted()
+        let label = trusted ? "✓ Pasted" : "✓ Copied"
         // Style C's accepted trade-off: when the card is on
         // screen it flashes briefly before the panel closes
         // and the paste lands. The flash was 0.42s until
@@ -1455,33 +1490,80 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         // paste lands in about a quarter second. The Paste
         // Stack pastes instantly (its refresh would wipe the
         // flash anyway) and relies on the menu-bar flash.
-        let flashed = fromStack ? false : flashCard(item, label: "✓ Pasted")
+        let flashed = fromStack ? false : flashCard(item, label: label)
         DispatchQueue.main.asyncAfter(deadline: .now() + (flashed ? 0.18 : 0)) { [weak self] in
             guard let self else { return }
             self.panel.orderOut(nil)
-            self.simulatePaste()
-            self.flashMenuBar("✓ Pasted")
+            if trusted {
+                // Hand focus back explicitly (v2.16.5): the
+                // keystroke used to ride on the panel closing
+                // reactivating the app underneath inside a
+                // 0.08s window; if it hadn't, the ⌘V landed
+                // in ClipKeep itself and vanished.
+                self.lastExternalApp?.activate(options: [])
+                self.simulatePaste()
+                self.flashMenuBar("✓ Pasted")
+            } else {
+                self.flashMenuBar("✓ Copied")
+                self.promptForPastePermission()
+            }
+        }
+    }
+
+    // Shown once per launch when a paste couldn't send its
+    // ⌘V because macOS hasn't granted Accessibility. The
+    // clip is already on the clipboard, so nothing is lost —
+    // ⌘V pastes it manually this time.
+    func promptForPastePermission() {
+        guard !pastePermissionPromptShown else { return }
+        pastePermissionPromptShown = true
+        let alert = NSAlert()
+        alert.messageText = "ClipKeep copied it — but macOS won't let it paste"
+        alert.informativeText = "Your clip is on the clipboard, so pressing ⌘V pastes it this time. For double-click paste to work on its own, ClipKeep needs Accessibility permission. If ClipKeep is already listed and switched on, switch it off and on again — an app update can leave a stale entry."
+        alert.addButton(withTitle: "Open Accessibility Settings")
+        alert.addButton(withTitle: "Later")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            // Register ClipKeep in the Accessibility list (and
+            // let macOS show its own prompt), then open the
+            // pane so the toggle is one click away.
+            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+            _ = AXIsProcessTrustedWithOptions(options)
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                NSWorkspace.shared.open(url)
+            }
         }
     }
 
     // Paste plain text (an image clip's OCR text) the same way:
-    // clipboard, panel away, ⌘V into the app underneath.
+    // clipboard, panel away, ⌘V into the app underneath. Same
+    // honesty rule as pasteBack (v2.16.5): no trust, no "✓
+    // Pasted" claim — copy, explain, offer the settings.
     func pasteText(_ text: String) {
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(text, forType: .string)
         selfWriteChangeCount = pb.changeCount
         panel.orderOut(nil)
-        simulatePaste()
-        flashMenuBar("✓ Pasted")
+        if AXIsProcessTrusted() {
+            lastExternalApp?.activate(options: [])
+            simulatePaste()
+            flashMenuBar("✓ Pasted")
+        } else {
+            flashMenuBar("✓ Copied")
+            promptForPastePermission()
+        }
     }
 
     // If Accessibility is granted, press ⌘V in the app underneath
-    // so the paste lands where the cursor is. Otherwise the content
-    // is on the clipboard and a manual ⌘V does it.
+    // so the paste lands where the cursor is. Callers check trust
+    // first (v2.16.5) and take the honest-copy path when it isn't
+    // granted; this check stays as a final guard. The delay is
+    // 0.12s (was 0.08) so the explicit reactivation in pasteBack
+    // has a beat to land before the keystroke goes out.
     func simulatePaste() {
         if AXIsProcessTrusted() {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
                 let src = CGEventSource(stateID: .combinedSessionState)
                 let vKey: CGKeyCode = 9 // kVK_ANSI_V
                 let down = CGEvent(keyboardEventSource: src, virtualKey: vKey, keyDown: true)

@@ -134,6 +134,9 @@ Status (Nov 18): the launch click in item 1 is confirmed from Femi's Loom — cl
 **Panel opens without grabbing search focus (v2.16.4)**
 24. Open the panel: no cursor sits in the search box — the feed holds focus. Double-click a clip with your cursor waiting in a text field elsewhere: it pastes cleanly (the v2.16.3 check, now without the focus fight Femi reported). Start typing with the panel open: the letters still land in the search box and the list filters. ⌘F still jumps to the search box when you want it.
 
+**Self-diagnosing paste (v2.16.5)**
+25. Double-click a clip with your cursor in a text field in another app. Two good outcomes: (a) it pastes — the explicit focus hand-back fixed it; or (b) you get ONE alert saying ClipKeep copied it but macOS won't let it paste, with a button that opens the Accessibility settings — that names the permission as the blocker. Enable ClipKeep there (if it's already listed and on, toggle it off and on — an update can leave a stale entry) and double-click again: it should paste. Either way the flash is honest now: "✓ Pasted" only when the keystroke was really sent, "✓ Copied" when only the copy happened. (Supersedes steps 23–24.)
+
 ## Queued — approved Nov 18, 2026 (Femi: "rely on your judgement")
 - Theme-legibility contrast checks added to the test suite (36 → 48 checks) — DONE, shipped inside v2.15.2.
 - The v2.15.3 number went to Femi's Nov 18 evening asks (card heights + menu-bar icon) — see the Shipped log. The `case 51, 117` key-code warning was fixed inside it (the where clause now gates each delete key separately — the single trailing where bound only to forward-delete, leaving ⌫ ungated while searching).
