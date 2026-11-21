@@ -926,7 +926,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     var settingsPauseCheckbox: NSButton?
     var settingsLimitPopup: NSPopUpButton?
     var settingsThemePopup: NSPopUpButton?
-    var settingsIconPopup: NSPopUpButton?
+    var settingsIconRadios: [NSButton] = []
     var settingsRTCheckbox: NSButton?
     var settingsClickCheckbox: NSButton?
 
@@ -4431,20 +4431,25 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         settingsThemePopup = themePopup
         a.addArrangedSubview(themePopup)
         a.addArrangedSubview(NSTextField(labelWithString: "Menu bar icon:"))
-        let iconPopup = NSPopUpButton()
-        // The same five treatments as ••• → Menu Bar Icon, from
-        // the one shared list (v2.15.7, at Femi's request — the
-        // choice lived only in the menu; Settings → Appearance
-        // is where he'd look; the list was unified in v2.16.0).
-        let iconStyles = Self.menuBarIconStyles
-        iconPopup.addItems(withTitles: iconStyles.map { $0.0 })
-        for (i, style) in iconStyles.enumerated() {
-            iconPopup.item(at: i)?.representedObject = style.1
+        // Radio buttons instead of a popup (v2.16.2, at Femi's
+        // request — with a dropdown the other treatments stayed
+        // hidden; as radios all five stay visible, so the current
+        // choice reads at a glance). The same five treatments as
+        // ••• → Menu Bar Icon, from the one shared list (unified
+        // in v2.16.0; the Settings control itself arrived in
+        // v2.15.7 as a popup).
+        let iconRadioStack = NSStackView()
+        iconRadioStack.orientation = .vertical
+        iconRadioStack.alignment = .leading
+        iconRadioStack.spacing = 6
+        settingsIconRadios = []
+        for style in Self.menuBarIconStyles {
+            let rb = NSButton(radioButtonWithTitle: style.title, target: self, action: #selector(settingsIconRadioChanged(_:)))
+            rb.identifier = NSUserInterfaceItemIdentifier(style.id)
+            settingsIconRadios.append(rb)
+            iconRadioStack.addArrangedSubview(rb)
         }
-        iconPopup.target = self
-        iconPopup.action = #selector(settingsIconChanged(_:))
-        settingsIconPopup = iconPopup
-        a.addArrangedSubview(iconPopup)
+        a.addArrangedSubview(iconRadioStack)
         let rt = NSButton(checkboxWithTitle: "Reduce Transparency (solid panel background)", target: self, action: #selector(settingsRTToggled(_:)))
         settingsRTCheckbox = rt
         a.addArrangedSubview(rt)
@@ -4549,10 +4554,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                 popup.selectItem(at: i)
             }
         }
-        if let popup = settingsIconPopup {
-            for i in 0..<popup.numberOfItems where (popup.item(at: i)?.representedObject as? String) == menuBarIconStyle {
-                popup.selectItem(at: i)
-            }
+        for rb in settingsIconRadios {
+            rb.state = rb.identifier?.rawValue == menuBarIconStyle ? .on : .off
         }
         settingsRTCheckbox?.state = UserDefaults.standard.bool(forKey: "ClipKeepReduceTransparency") ? .on : .off
         refreshSettingsUpdateStatus()
@@ -4599,8 +4602,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         if let mi = sender.selectedItem { themeChosen(mi) }
     }
 
-    @objc func settingsIconChanged(_ sender: NSPopUpButton) {
-        if let mi = sender.selectedItem { menuBarIconChosen(mi) }
+    @objc func settingsIconRadioChanged(_ sender: NSButton) {
+        guard let id = sender.identifier?.rawValue else { return }
+        for rb in settingsIconRadios { rb.state = rb == sender ? .on : .off }
+        UserDefaults.standard.set(id, forKey: "ClipKeepMenuBarIcon")
+        refreshStatusItem()
     }
 
     @objc func settingsRTToggled(_ sender: NSButton) {
