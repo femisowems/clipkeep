@@ -128,6 +128,9 @@ Status (Nov 18): the launch click in item 1 is confirmed from Femi's Loom — cl
 **Menu bar icon radios (v2.16.2)**
 22. Open Settings → Appearance: the five menu-bar icon styles show as radio buttons, all visible at once, with your current style selected. Pick a different one: the menu-bar icon changes immediately, and the ••• → Menu Bar Icon submenu still agrees with the radios. Close and reopen Settings: the selection shown is still the style in use.
 
+**Double-click pastes (v2.16.3)**
+23. Put your cursor in a text field in another app, open the panel and double-click a clip: the panel closes and the clip lands in the field — no separate ⌘V — with a "✓ Pasted" flash on the card and menu bar. Right-click a card → Copy still copies only: the panel closes after the "✓ Copied" flash and nothing is pasted. (Supersedes the double-click half of step 3.)
+
 ## Queued — approved Nov 18, 2026 (Femi: "rely on your judgement")
 - Theme-legibility contrast checks added to the test suite (36 → 48 checks) — DONE, shipped inside v2.15.2.
 - The v2.15.3 number went to Femi's Nov 18 evening asks (card heights + menu-bar icon) — see the Shipped log. The `case 51, 117` key-code warning was fixed inside it (the where clause now gates each delete key separately — the single trailing where bound only to forward-delete, leaving ⌫ ungated while searching).

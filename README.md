@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/femisowems/clipkeep/actions/workflows/build.yml"><img src="https://github.com/femisowems/clipkeep/actions/workflows/build.yml/badge.svg" alt="Build status"></a>
-  <a href="https://github.com/femisowems/clipkeep/releases"><img src="https://img.shields.io/badge/version-v2.16.2-e4572e" alt="Latest version"></a>
+  <a href="https://github.com/femisowems/clipkeep/releases"><img src="https://img.shields.io/badge/version-v2.16.3-e4572e" alt="Latest version"></a>
   <a href="https://github.com/femisowems/clipkeep/releases"><img src="https://img.shields.io/github/downloads/femisowems/clipkeep/total" alt="Downloads"></a>
   <a href="https://github.com/femisowems/clipkeep/blob/main/LICENSE"><img src="https://img.shields.io/github/license/femisowems/clipkeep" alt="License"></a>
 </p>
@@ -24,7 +24,7 @@ copy never leaves your Mac.
 *(It keeps what you copy, for safekeeping.)*
 
 > 🚧 **Work in progress** — ClipKeep is under active development
-> (current release: **v2.16.2**). Features, behaviour and this README
+> (current release: **v2.16.3**). Features, behaviour and this README
 > may change between versions, and things may break.
 
 ---
@@ -86,13 +86,13 @@ holds whatever you copy.*
 
 ### Paste it back
 - **Paste back, three ways**
-  - Double-click any clip to copy it back to the clipboard — the
-    panel closes once the copy lands. (A single click just
-    selects it.) To paste
-    a clip straight into the app underneath instead, use
-    **⌘1–⌘9**, Enter, or the card's paste button — with
-    Accessibility permission, ClipKeep presses ⌘V for you so it
-    lands where your cursor is.
+  - Double-click any clip to paste it straight into the app
+    underneath — ClipKeep copies it, closes the panel and,
+    with Accessibility permission, presses ⌘V for you so it
+    lands where your cursor is. (A single click just
+    selects it.) **⌘1–⌘9** and Enter paste the same way;
+    to copy a clip *without* pasting it, right-click the
+    card → Copy.
   - **⌘1–⌘9** quick-pastes the first nine visible clips while the
     panel is open (the cards show their numbers).
   - **Paste Stack** — queue clips with **+ Stack**, then paste them
@@ -194,7 +194,7 @@ Download button and replace the app manually one last time.
 | Action | What it does |
 | --- | --- |
 | **⌘⇧V** or click the menu-bar icon | Show / hide the panel |
-| **Double-click a clip** | Copy it back to the clipboard (panel closes once the copy lands); a single click selects |
+| **Double-click a clip** | Paste it into the app underneath (copies + ⌘V, panel closes); a single click selects; right-click → Copy copies without pasting |
 | **⌘1–⌘9** (panel open) | Quick-paste that numbered clip |
 | **↑ / ↓ / ← / →** (panel open) | Move the selection (←/→ while the search is empty) |
 | **Enter** (panel open) | Paste the selected clip |
