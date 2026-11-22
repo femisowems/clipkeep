@@ -1095,3 +1095,34 @@ was never the transport's property.
   percentile CPU/network/memory all < 20%); accounts idle 30+ days may be
   deemed abandoned; home-region rule. The 2026 reduction from 4 OCPUs +
   24 GB is recorded in Oct 2026 coverage of Oracle's docs.
+
+## 8. Assessment — Nov 22, 2026
+
+A consolidated go/no-go read of §§1–7 against where the Mac app stands today.
+
+**Verdict: proceed — as a companion, Android first.** The research conclusion
+has not moved: passive capture is impossible on both phone platforms, so the
+mobile product is a sync viewer plus deliberate capture (share-to-save,
+tap-to-capture), and that product is genuinely useful — the Mac's history is
+where the value accumulates, and copy-back is unrestricted on phones.
+
+**What's changed since the research (Nov 17–18):**
+
+- The Mac-side gate is cleared: the app is at v2.16.5 (Nov 21) with its core
+  flows confirmed on Femi's Mac, including double-click paste (checklist
+  steps 23–25, closed Nov 21 after the stale-Accessibility-entry fix).
+- Nothing in §§1–7 has been overtaken by events; the two dated traps stand —
+  Amplify Gen 1 dies May 1, 2027, and the AWS free plan cliffs ~May 18, 2027
+  (credits expire May 19, 2027) — and a Drive-based v1 depends on neither.
+- The only Mac-side prerequisite is the sync mirror writer (§3): a few days
+  of work, and valuable on its own as a history backup/export.
+
+**Shape of the commitment:** native Kotlin/Compose Android MVP (sync viewer
++ share-to-save + Quick Settings tap-to-capture + phone→Mac flow) at ~3–5
+weeks part-time, on Drive folder sync, no backend, no accounts. iOS follows
+on the same sync design. The v2 backend (Firebase vs Supabase vs AWS-B)
+stays an open decision behind the transport interface; profiles stay opt-in
+and E2EE stays the design goal; sensitive clips never sync.
+
+**Decision needed from Femi:** un-park ROADMAP item 16 and scope the MVP as
+the next project, or keep it parked behind the Mac roadmap's top-10.
