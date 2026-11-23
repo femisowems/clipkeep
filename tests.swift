@@ -248,10 +248,10 @@ struct ClipKeepTests {
 
         // Bytes whose standard base64 spelling uses +, / and =.
         let tricky = Data([0xfb, 0xff, 0xfe, 0x00, 0x01])
-        let encoded = base64URLEncode(tricky)
+        let encodedB64 = base64URLEncode(tricky)
         check("auth: base64url avoids +, / and =",
-              !encoded.contains("+") && !encoded.contains("/") && !encoded.contains("="))
-        checkEqual("auth: base64url round-trips", base64URLDecode(encoded), tricky)
+              !encodedB64.contains("+") && !encodedB64.contains("/") && !encodedB64.contains("="))
+        checkEqual("auth: base64url round-trips", base64URLDecode(encodedB64), tricky)
 
         // Theme legibility (Nov 18, 2026) — every theme's
         // footer icon tint, accent and on-accent must stay
