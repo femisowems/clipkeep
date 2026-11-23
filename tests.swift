@@ -206,6 +206,53 @@ struct ClipKeepTests {
         check("sync: tombstoned() stamps the deletion time and keeps the id",
               staleStone.effectiveUpdatedAt == purgeNow - 31 * 24 * 60 * 60 && staleStone.id == "stale")
 
+        // Auth core (v2.18.0) — SHA-256, PKCE, the authorize
+        // URL, JWT claims, session expiry, base64url. The
+        // vectors are the published ones (FIPS 180-4 example,
+        // RFC 7636 Appendix B), so a broken digest or encoder
+        // fails here instead of at a real sign-in.
+        checkEqual("auth: sha256 of abc matches the FIPS vector",
+                   sha256Hex(Data("abc".utf8)),
+                   "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        checkEqual("auth: RFC 7636 appendix B challenge",
+                   pkceChallenge(for: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+                   "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
+        let googleURL = AuthConfig.authorizeURL(provider: .google, state: "state-123", challenge: "chal-456")
+        check("auth: google authorize URL is built", googleURL != nil)
+        if let googleURL {
+            let query = URLComponents(url: googleURL, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            func param(_ name: String) -> String? { query.first { $0.name == name }?.value }
+            checkEqual("auth: authorize URL carries the Google IdP", param("identity_provider"), "Google")
+            checkEqual("auth: authorize URL uses S256", param("code_challenge_method"), "S256")
+            checkEqual("auth: authorize URL carries the redirect URI", param("redirect_uri"), "io.starterdev.clipkeep://auth")
+            checkEqual("auth: authorize URL carries the state", param("state"), "state-123")
+        }
+        // A hand-built unsigned JWT: header.payload.signature
+        // with base64url segments throughout.
+        func b64url(_ s: String) -> String { base64URLEncode(Data(s.utf8)) }
+        let token = b64url("{\"alg\":\"none\",\"typ\":\"JWT\"}")
+            + "." + b64url("{\"sub\":\"user-1\",\"email\":\"femi@example.com\",\"name\":\"Femi Test\"}")
+            + "." + b64url("sig")
+        let identity = identityFromIDToken(token)
+        check("auth: JWT payload decodes to an identity", identity != nil)
+        checkEqual("auth: JWT sub extracted", identity?.subject, "user-1")
+        checkEqual("auth: JWT email extracted", identity?.email, "femi@example.com")
+        checkEqual("auth: JWT name extracted", identity?.name, "Femi Test")
+
+        let session = AuthSession(idToken: token, accessToken: "a", refreshToken: "r",
+                                  expiresAt: 2_000, identity: identity!)
+        check("auth: session valid before expiry", !session.isExpired(at: 1_999))
+        check("auth: session expired at expiry", session.isExpired(at: 2_000))
+        check("auth: session needs refresh inside the skew window", session.needsRefresh(at: 1_800))
+        check("auth: session fresh outside the skew window", !session.needsRefresh(at: 1_000))
+
+        // Bytes whose standard base64 spelling uses +, / and =.
+        let tricky = Data([0xfb, 0xff, 0xfe, 0x00, 0x01])
+        let encoded = base64URLEncode(tricky)
+        check("auth: base64url avoids +, / and =",
+              !encoded.contains("+") && !encoded.contains("/") && !encoded.contains("="))
+        checkEqual("auth: base64url round-trips", base64URLDecode(encoded), tricky)
+
         // Theme legibility (Nov 18, 2026) — every theme's
         // footer icon tint, accent and on-accent must stay
         // readable against the surfaces they sit on (WCAG

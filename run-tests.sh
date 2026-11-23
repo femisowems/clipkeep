@@ -16,6 +16,7 @@ trap 'rm -f .tests-main.swift clipkeep-tests' EXIT
 
 swiftc -parse-as-library -O -o clipkeep-tests .tests-main.swift tests.swift \
     -framework Cocoa -framework Carbon -framework ApplicationServices \
-    -framework Vision -framework UniformTypeIdentifiers -framework ImageIO
+    -framework Vision -framework UniformTypeIdentifiers -framework ImageIO \
+    -framework AuthenticationServices -framework Security
 
 ./clipkeep-tests

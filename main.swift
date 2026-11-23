@@ -14,6 +14,8 @@ import Vision
 import UniformTypeIdentifiers
 import ImageIO
 import CoreImage
+import AuthenticationServices
+import Security
 
 // MARK: - Model
 
@@ -965,6 +967,522 @@ func trimmedText(_ text: String) -> String {
     return out.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
+// MARK: - Auth (v2.18.0)
+//
+// The Cognito client skeleton for ClipKeep Cloud. Every
+// client — the Mac included — signs in through Cognito's
+// OAuth web flow (authorization code + PKCE) in
+// ASWebAuthenticationSession against the hosted UI on
+// auth.starterdev.io: user pools cannot consume a native
+// Apple/Google credential, so there is deliberately no
+// native provider SDK here (RESEARCH-NOTES §2). Tokens live
+// in ONE Keychain item so a rotated refresh token can never
+// be half-written.
+//
+// AuthConfig.clientID is EMPTY until the dev user pool
+// exists. While it is empty the sign-in UI stays fully
+// visible (per the approved mocks) and signIn() reports
+// "not configured" instead of starting a flow — the app
+// ships honest: accounts are not live yet, and ClipKeep
+// stays fully local until they are.
+
+enum AuthConfig {
+    static let region = "us-east-1"
+    static let hostedDomain = "auth.starterdev.io"
+    static let clientID = ""   // the Mac app client — filled in when the dev pool lands
+    // Apple sign-in is DEFERRED (Femi, Nov 22, 2026): no
+    // Apple Developer Program enrolment yet, so the pool
+    // will carry Google + email OTP only — no Apple IdP.
+    // The Apple button stays visible everywhere it is
+    // mocked, but while this is false signIn(.apple) shows
+    // the enrolment note instead of launching a flow whose
+    // identity_provider deep-link would fail against a pool
+    // with no Apple IdP. Flip it when the IdP is configured.
+    static let appleEnabled = false
+    static let callbackScheme = "io.starterdev.clipkeep"
+    static let redirectURI = "io.starterdev.clipkeep://auth"
+
+    static var isConfigured: Bool { !clientID.isEmpty }
+    static var authorizeEndpoint: String { "https://\(hostedDomain)/oauth2/authorize" }
+    static var tokenEndpoint: String { "https://\(hostedDomain)/oauth2/token" }
+    static var revokeEndpoint: String { "https://\(hostedDomain)/oauth2/revoke" }
+    static var logoutEndpoint: String { "https://\(hostedDomain)/logout" }
+
+    // The authorize URL for one provider. Google and Apple
+    // deep-link their hosted-UI identity provider; email
+    // opens the plain hosted UI, whose passwordless email
+    // one-time code is a native Cognito (Essentials) first
+    // factor — no custom challenge Lambdas.
+    static func authorizeURL(provider: AuthProvider, state: String, challenge: String) -> URL? {
+        var components = URLComponents(string: authorizeEndpoint)
+        var query: [URLQueryItem] = [
+            URLQueryItem(name: "response_type", value: "code"),
+            URLQueryItem(name: "client_id", value: clientID),
+            URLQueryItem(name: "redirect_uri", value: redirectURI),
+            URLQueryItem(name: "scope", value: "openid email profile"),
+            URLQueryItem(name: "code_challenge", value: challenge),
+            URLQueryItem(name: "code_challenge_method", value: "S256"),
+            URLQueryItem(name: "state", value: state)
+        ]
+        if let idp = provider.identityProviderParameter {
+            query.append(URLQueryItem(name: "identity_provider", value: idp))
+        }
+        components?.queryItems = query
+        return components?.url
+    }
+}
+
+enum AuthProvider {
+    case google, apple, email
+
+    // The hosted UI's identity_provider value; nil = the
+    // plain hosted UI (email code lives there).
+    var identityProviderParameter: String? {
+        switch self {
+        case .google: return "Google"
+        case .apple: return "SignInWithApple"
+        case .email: return nil
+        }
+    }
+}
+
+// MARK: base64url + SHA-256 (pure — covered by tests.swift)
+//
+// RFC 4648 §5 base64url without padding, and a from-scratch
+// SHA-256 (FIPS 180-4). The single-file swiftc build has no
+// bridging header for CommonCrypto, and CryptoKit would be
+// a second framework for one digest; PKCE needs exactly one
+// hash — SHA-256 of the verifier — so the implementation is
+// small, fixed, and pinned by test vectors in tests.swift.
+
+func base64URLEncode(_ data: Data) -> String {
+    data.base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-")
+        .replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+}
+
+func base64URLDecode(_ string: String) -> Data? {
+    var s = string
+        .replacingOccurrences(of: "-", with: "+")
+        .replacingOccurrences(of: "_", with: "/")
+    while s.count % 4 != 0 { s += "=" }
+    return Data(base64Encoded: s)
+}
+
+func sha256(_ data: Data) -> Data {
+    // Round constants: the first 32 bits of the fractional
+    // parts of the cube roots of the first 64 primes.
+    let k: [UInt32] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+    ]
+    var h: [UInt32] = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+                       0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
+
+    // Padding: message || 0x80 || zeros || the 64-bit
+    // big-endian bit length, out to a multiple of 64 bytes.
+    var message = [UInt8](data)
+    let bitLength = UInt64(message.count) &* 8
+    message.append(0x80)
+    while message.count % 64 != 56 { message.append(0) }
+    for shift in stride(from: 56, through: 0, by: -8) {
+        message.append(UInt8((bitLength >> UInt64(shift)) & 0xff))
+    }
+
+    func rotr(_ x: UInt32, _ n: UInt32) -> UInt32 { (x >> n) | (x << (32 - n)) }
+
+    var w = [UInt32](repeating: 0, count: 64)
+    for blockStart in stride(from: 0, to: message.count, by: 64) {
+        for i in 0..<16 {
+            let j = blockStart + i * 4
+            w[i] = (UInt32(message[j]) << 24) | (UInt32(message[j + 1]) << 16)
+                 | (UInt32(message[j + 2]) << 8) | UInt32(message[j + 3])
+        }
+        for i in 16..<64 {
+            let s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3)
+            let s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10)
+            w[i] = w[i - 16] &+ s0 &+ w[i - 7] &+ s1
+        }
+        var (a, b, c, d, e, f, g, hh) = (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7])
+        for i in 0..<64 {
+            let s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)
+            let ch = (e & f) ^ (~e & g)
+            let temp1 = hh &+ s1 &+ ch &+ k[i] &+ w[i]
+            let s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)
+            let maj = (a & b) ^ (a & c) ^ (b & c)
+            let temp2 = s0 &+ maj
+            hh = g; g = f; f = e; e = d &+ temp1
+            d = c; c = b; b = a; a = temp1 &+ temp2
+        }
+        h[0] &+= a; h[1] &+= b; h[2] &+= c; h[3] &+= d
+        h[4] &+= e; h[5] &+= f; h[6] &+= g; h[7] &+= hh
+    }
+    var digest = Data()
+    for word in h {
+        digest.append(UInt8((word >> 24) & 0xff))
+        digest.append(UInt8((word >> 16) & 0xff))
+        digest.append(UInt8((word >> 8) & 0xff))
+        digest.append(UInt8(word & 0xff))
+    }
+    return digest
+}
+
+func sha256Hex(_ data: Data) -> String {
+    sha256(data).map { String(format: "%02x", $0) }.joined()
+}
+
+// PKCE (RFC 7636): the verifier never leaves the app — only
+// its SHA-256 rides in the authorize URL, and the token
+// exchange proves possession. 32 random bytes → 43 chars.
+func makePKCEVerifier() -> String {
+    let bytes = (0..<32).map { _ in UInt8.random(in: UInt8.min ... UInt8.max) }
+    return base64URLEncode(Data(bytes))
+}
+
+func pkceChallenge(for verifier: String) -> String {
+    base64URLEncode(sha256(Data(verifier.utf8)))
+}
+
+func formEscape(_ value: String) -> String {
+    var allowed = CharacterSet.alphanumerics
+    allowed.insert(charactersIn: "-._~")
+    return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+}
+
+struct AuthIdentity: Codable, Equatable {
+    var name: String
+    var email: String
+    var subject: String   // the Cognito sub — sync data is keyed by this, never by email
+}
+
+// One stored session = one Keychain item (see AuthKeychain),
+// so a rotated refresh token can never be half-written.
+struct AuthSession: Codable {
+    var idToken: String
+    var accessToken: String
+    var refreshToken: String
+    var expiresAt: Double   // access-token expiry, seconds since 1970
+    var identity: AuthIdentity
+
+    func isExpired(at now: Double) -> Bool { now >= expiresAt }
+    // Refresh a little early rather than mid-request.
+    func needsRefresh(at now: Double) -> Bool { now >= expiresAt - 300 }
+}
+
+// The ID token arrives over TLS straight from the token
+// endpoint, so the client decodes its claims without
+// verifying the signature — verification is the sync API's
+// job (the pool's JWKS, on every request).
+func decodeJWTPayload(_ token: String) -> [String: Any]? {
+    let parts = token.split(separator: ".")
+    guard parts.count == 3, let data = base64URLDecode(String(parts[1])),
+          let object = try? JSONSerialization.jsonObject(with: data),
+          let claims = object as? [String: Any] else { return nil }
+    return claims
+}
+
+func identityFromIDToken(_ token: String) -> AuthIdentity? {
+    guard let claims = decodeJWTPayload(token),
+          let subject = claims["sub"] as? String else { return nil }
+    return AuthIdentity(name: claims["name"] as? String ?? "",
+                        email: claims["email"] as? String ?? "",
+                        subject: subject)
+}
+
+// Tokens in ONE generic-password item, marked
+// ThisDeviceOnly: they must not roam via iCloud Keychain or
+// migrate to another Mac (RESEARCH-NOTES §4). Reads are
+// failure-tolerant — a missing or unreadable item simply
+// means "signed out", which matters because ad-hoc signing
+// changes the app's code identity between builds and can
+// orphan Keychain items across updates (the v2.16.5 TCC
+// lesson, in Keychain form).
+enum AuthKeychain {
+    static let service = "io.starterdev.clipkeep.auth"
+    static let account = "session"
+
+    static func save(_ session: AuthSession) {
+        guard let data = try? JSONEncoder().encode(session) else { return }
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+        let status = SecItemUpdate(query as CFDictionary,
+                                   [kSecValueData as String: data] as CFDictionary)
+        if status == errSecItemNotFound {
+            var item = query
+            item[kSecValueData as String] = data
+            item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            SecItemAdd(item as CFDictionary, nil)
+        }
+    }
+
+    static func load() -> AuthSession? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var result: AnyObject?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data else { return nil }
+        return try? JSONDecoder().decode(AuthSession.self, from: data)
+    }
+
+    static func clear() {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+        SecItemDelete(query as CFDictionary)
+    }
+}
+
+final class AuthManager: NSObject, ASWebAuthenticationPresentationContextProviding {
+    enum State: Equatable {
+        case signedOut
+        case signingIn
+        case signedIn(AuthIdentity)
+        case error(String)
+    }
+
+    private(set) var state: State = .signedOut {
+        didSet { onStateChange?() }
+    }
+    private(set) var session: AuthSession?
+
+    // Wired by AppController: refresh the panel + Settings on
+    // every transition, show the "not live yet" alert, and
+    // the delete-unavailable note.
+    var onStateChange: (() -> Void)?
+    var onNotConfigured: (() -> Void)?
+    var onAppleUnavailable: (() -> Void)?
+    var onDeleteUnavailable: (() -> Void)?
+    // The window the system auth sheet anchors to — the
+    // Settings window or the panel, whichever invoked it.
+    weak var anchorWindow: NSWindow?
+
+    private var webSession: ASWebAuthenticationSession?
+    private var pendingVerifier: String?
+    private var pendingState: String?
+
+    override init() {
+        let stored = AuthKeychain.load()
+        session = stored
+        super.init()
+        if let stored {
+            state = .signedIn(stored.identity)
+        }
+    }
+
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        anchorWindow ?? NSApp.keyWindow ?? NSApp.windows.first ?? ASPresentationAnchor()
+    }
+
+    private func restoreState() {
+        if let current = session {
+            state = .signedIn(current.identity)
+        } else {
+            state = .signedOut
+        }
+    }
+
+    func signIn(provider: AuthProvider) {
+        guard AuthConfig.isConfigured else {
+            onNotConfigured?()
+            return
+        }
+        // Apple is deferred (see AuthConfig.appleEnabled):
+        // the note, never a flow the pool can't answer.
+        if provider == .apple, !AuthConfig.appleEnabled {
+            onAppleUnavailable?()
+            return
+        }
+        guard webSession == nil else { return }
+        let verifier = makePKCEVerifier()
+        let nonce = UUID().uuidString
+        pendingVerifier = verifier
+        pendingState = nonce
+        guard let url = AuthConfig.authorizeURL(provider: provider, state: nonce,
+                                                challenge: pkceChallenge(for: verifier)) else {
+            state = .error("Couldn't build the sign-in address.")
+            return
+        }
+        state = .signingIn
+        let web = ASWebAuthenticationSession(url: url, callbackURLScheme: AuthConfig.callbackScheme) { [weak self] callbackURL, error in
+            DispatchQueue.main.async {
+                self?.finishSignIn(callbackURL: callbackURL, error: error)
+            }
+        }
+        web.presentationContextProvider = self
+        web.prefersEphemeralWebBrowserSession = false
+        webSession = web
+        if !web.start() {
+            webSession = nil
+            state = .error("Couldn't open the sign-in sheet.")
+        }
+    }
+
+    private func finishSignIn(callbackURL: URL?, error: Error?) {
+        webSession = nil
+        if let error {
+            // The completion's errors are all in the
+            // ASWebAuthenticationSession domain; a cancelled
+            // sheet (code 1) is the common one and is not an
+            // error state — the user just changed their mind.
+            if (error as NSError).code == ASWebAuthenticationSessionError.canceledLogin.rawValue {
+                restoreState()
+            } else {
+                state = .error(error.localizedDescription)
+            }
+            return
+        }
+        guard let callbackURL,
+              let components = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false),
+              let items = components.queryItems else {
+            state = .error("Sign-in didn't return to ClipKeep.")
+            return
+        }
+        if let message = items.first(where: { $0.name == "error_description" })?.value
+            ?? items.first(where: { $0.name == "error" })?.value {
+            state = .error(message)
+            return
+        }
+        guard items.first(where: { $0.name == "state" })?.value == pendingState,
+              let code = items.first(where: { $0.name == "code" })?.value,
+              let verifier = pendingVerifier else {
+            state = .error("Sign-in returned an unexpected response.")
+            return
+        }
+        pendingState = nil
+        pendingVerifier = nil
+        exchangeCode(code, verifier: verifier)
+    }
+
+    private func exchangeCode(_ code: String, verifier: String) {
+        performTokenRequest(form: [
+            "grant_type": "authorization_code",
+            "client_id": AuthConfig.clientID,
+            "code": code,
+            "redirect_uri": AuthConfig.redirectURI,
+            "code_verifier": verifier
+        ]) { [weak self] newSession in
+            if let newSession {
+                self?.state = .signedIn(newSession.identity)
+            } else {
+                self?.state = .error("Sign-in couldn't be completed.")
+            }
+        }
+    }
+
+    // Refresh once when the access token is at/past the skew
+    // window. Rotation rule (RESEARCH-NOTES §2): when the
+    // response carries a NEW refresh token it always replaces
+    // the stored one, and the merged session is written to
+    // the Keychain before the state changes — a crash
+    // mid-refresh can't lose the session. A refused refresh
+    // means the session is over: fall back to signed-out
+    // quietly, a state change and never a modal.
+    func refreshIfNeeded() {
+        guard AuthConfig.isConfigured, let current = session,
+              current.needsRefresh(at: Date().timeIntervalSince1970),
+              !current.refreshToken.isEmpty else { return }
+        performTokenRequest(form: [
+            "grant_type": "refresh_token",
+            "client_id": AuthConfig.clientID,
+            "refresh_token": current.refreshToken
+        ]) { [weak self] newSession in
+            if let newSession {
+                self?.state = .signedIn(newSession.identity)
+            } else {
+                self?.session = nil
+                AuthKeychain.clear()
+                self?.state = .signedOut
+            }
+        }
+    }
+
+    // One token-endpoint round trip, shared by the code
+    // exchange and refresh. The completion runs on the main
+    // queue, with the Keychain already updated.
+    private func performTokenRequest(form: [String: String], completion: @escaping (AuthSession?) -> Void) {
+        guard let url = URL(string: AuthConfig.tokenEndpoint) else { completion(nil); return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.httpBody = form
+            .map { "\(formEscape($0.key))=\(formEscape($0.value))" }
+            .joined(separator: "&")
+            .data(using: .utf8)
+        URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
+            var result: AuthSession?
+            if let data,
+               let object = try? JSONSerialization.jsonObject(with: data),
+               let json = object as? [String: Any],
+               let idToken = json["id_token"] as? String,
+               let accessToken = json["access_token"] as? String,
+               let identity = identityFromIDToken(idToken) {
+                let expiresIn = (json["expires_in"] as? NSNumber)?.doubleValue ?? 3600
+                // Rotation: a new refresh token in the
+                // response always wins; only when the
+                // response omits one does the stored token
+                // carry over.
+                let refresh = (json["refresh_token"] as? String) ?? self?.session?.refreshToken ?? ""
+                result = AuthSession(idToken: idToken, accessToken: accessToken,
+                                     refreshToken: refresh,
+                                     expiresAt: Date().timeIntervalSince1970 + expiresIn,
+                                     identity: identity)
+            }
+            DispatchQueue.main.async {
+                if let result {
+                    self?.session = result
+                    AuthKeychain.save(result)
+                }
+                completion(result)
+            }
+        }.resume()
+    }
+
+    // Local sign-out (RESEARCH-NOTES §4): revoke the refresh
+    // token best-effort so it dies server-side too, clear the
+    // Keychain, and leave the local history untouched. Global
+    // sign-out is deliberately NOT what this does.
+    func signOut() {
+        if AuthConfig.isConfigured, let current = session, !current.refreshToken.isEmpty,
+           let url = URL(string: AuthConfig.revokeEndpoint) {
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+            request.httpBody = "client_id=\(formEscape(AuthConfig.clientID))&token=\(formEscape(current.refreshToken))&token_type_hint=refresh_token"
+                .data(using: .utf8)
+            URLSession.shared.dataTask(with: request) { _, _, _ in }.resume()
+        }
+        session = nil
+        AuthKeychain.clear()
+        state = .signedOut
+    }
+
+    // Skeleton: the DELETE /account endpoint doesn't exist
+    // yet, so there is nothing honest to call. AppController
+    // confirms with the user first, then lands here — the
+    // answer is "enabled when sync launches", never a fake
+    // deletion.
+    func deleteAccount() {
+        onDeleteUnavailable?()
+    }
+}
+
 // MARK: - App
 
 // Borderless panel window (v2.10.0): a .borderless NSWindow
@@ -1031,6 +1549,40 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     var settingsUpdateStatus: NSTextField?
     var settingsExclusionsStack: NSStackView?
 
+    // Account + sync (v2.18.0): one AuthManager serves the
+    // panel's Sync view and the Settings Account tab alike.
+    // The sync toggle persists as ClipKeepSyncEnabled
+    // (default off); the engine itself arrives with ClipKeep
+    // Cloud — in this skeleton the toggle only records the
+    // user's intent, and the UI says so.
+    let auth = AuthManager()
+    var syncEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "ClipKeepSyncEnabled") }
+        set { UserDefaults.standard.set(newValue, forKey: "ClipKeepSyncEnabled") }
+    }
+    var avatarButton: HoverButton!
+    var avatarDot: PassthroughView!
+    var syncView: NSView!
+    var syncSignedInView: NSView!
+    var syncSignedOutView: NSView!
+    var syncCardViews: [NSView] = []
+    var syncOpen = false
+    var heroRingView: NSView!
+    var heroGlyphView: NSImageView!
+    var heroStatusLabel: NSTextField!
+    var heroDetailLabel: NSTextField!
+    var heroToggle: NSSwitch!
+    var heroSyncNowButton: NSButton!
+    var syncIdentityLabel: NSTextField!
+    var syncEmailLabel: NSTextField!
+    var settingsAccountSignedOutView: NSStackView?
+    var settingsAccountSignedInView: NSStackView?
+    var settingsAccountAvatarLabel: NSTextField?
+    var settingsAccountNameLabel: NSTextField?
+    var settingsAccountEmailLabel: NSTextField?
+    var settingsSyncCheckbox: NSButton?
+    var settingsSyncStatusLabel: NSTextField?
+
     var timer: Timer?
     var lastChangeCount = 0
     var selfWriteChangeCount = -1
@@ -1076,6 +1628,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         refreshStatusItem()
 
         buildPanel()
+        // Account wiring (v2.18.0): one AuthManager, two
+        // surfaces (panel Sync view + Settings Account tab).
+        auth.onStateChange = { [weak self] in
+            self?.refreshSyncView()
+            self?.refreshSettingsAccount()
+        }
+        auth.onNotConfigured = { [weak self] in self?.showAccountsNotLiveAlert() }
+        auth.onAppleUnavailable = { [weak self] in self?.showAppleUnavailableAlert() }
+        auth.onDeleteUnavailable = { [weak self] in self?.showDeleteUnavailableAlert() }
+        refreshSyncView()
+        auth.refreshIfNeeded()
         checkForUpdate()
         registerHotKeys()
         installKeyMonitor()
@@ -2742,6 +3305,36 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         overflowButton.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(overflowButton)
 
+        // Account avatar (v2.18.0): the Sync view's tab, at
+        // the right end of the search row, before the •••
+        // button. Signed in it carries the account's initial
+        // on brand orange; signed out, a greyed person glyph.
+        // A status dot rides its corner (green = signed in and
+        // sync on, grey = signed out or sync off, amber = auth
+        // error) and a blue ring marks it while the Sync view
+        // is open. refreshAvatarButton owns the states.
+        avatarButton = HoverButton(frame: .zero)
+        avatarButton.title = ""
+        avatarButton.target = self
+        avatarButton.action = #selector(avatarClicked)
+        avatarButton.chromeCornerRadius = 16
+        avatarButton.baseTint = .white
+        avatarButton.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(avatarButton)
+
+        avatarDot = PassthroughView()
+        avatarDot.wantsLayer = true
+        avatarDot.layer?.cornerRadius = 4
+        avatarDot.layer?.borderWidth = 1.5
+        avatarDot.translatesAutoresizingMaskIntoConstraints = false
+        avatarButton.addSubview(avatarDot)
+        NSLayoutConstraint.activate([
+            avatarDot.trailingAnchor.constraint(equalTo: avatarButton.trailingAnchor, constant: -1),
+            avatarDot.bottomAnchor.constraint(equalTo: avatarButton.bottomAnchor, constant: -1),
+            avatarDot.widthAnchor.constraint(equalToConstant: 8),
+            avatarDot.heightAnchor.constraint(equalToConstant: 8)
+        ])
+
         // Update strip (v2.6.0): pinned under the search row.
         // Hidden (height 0) unless an update is available, an
         // install is running, or a transient message shows.
@@ -2800,7 +3393,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             // full-size-content window this anchor kept the field
             // out from under the title bar.)
             searchField.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: Self.spaceMargin),
-            searchField.trailingAnchor.constraint(equalTo: overflowButton.leadingAnchor, constant: -8),
+            searchField.trailingAnchor.constraint(equalTo: avatarButton.leadingAnchor, constant: -8),
+
+            avatarButton.trailingAnchor.constraint(equalTo: overflowButton.leadingAnchor, constant: -8),
+            avatarButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
+            avatarButton.widthAnchor.constraint(equalToConstant: 32),
+            avatarButton.heightAnchor.constraint(equalToConstant: 32),
 
             overflowButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -Self.spaceMargin),
             overflowButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
@@ -2882,6 +3480,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         stackBarTopConstraint.isActive = true
         stackBarZeroHeight = stackBar.heightAnchor.constraint(equalToConstant: 0)
         stackBarZeroHeight.isActive = true
+
+        // The Sync view (v2.18.0) is built last so it layers
+        // above the feed it swaps with; it starts hidden.
+        buildSyncView(in: content)
 
         // Apply the saved theme (Warm Tint on first run); this
         // also does the first refreshList with themed cards.
@@ -3094,6 +3696,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         overflowButton?.hoverBG = theme.fieldHoverBG
         overflowButton?.pressedBG = theme.pressedWash
         overflowButton?.chromeBorderColor = theme.fieldBorder
+        // Sync view cards + avatar (v2.18.0) follow the theme
+        // like everything else in the panel.
+        for card in syncCardViews {
+            card.layer?.backgroundColor = theme.cardBG.cgColor
+            card.layer?.borderColor = theme.cardBorder.cgColor
+        }
+        refreshAvatarButton()
         refreshUpdateStrip()
         refreshList()
     }
@@ -3108,6 +3717,609 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         let key = "ClipKeepReduceTransparency"
         UserDefaults.standard.set(!UserDefaults.standard.bool(forKey: key), forKey: key)
         applyTheme(currentTheme, persist: false)
+    }
+
+    // MARK: Sync view (v2.18.0 — Hero Dashboard)
+
+    // One card in the feed's language: themed surface, 14pt
+    // radius, hairline border. Registered in syncCardViews
+    // so applyTheme can restyle the set on a theme change.
+    private func syncCard() -> NSView {
+        let card = NSView()
+        card.wantsLayer = true
+        card.layer?.backgroundColor = currentTheme.cardBG.cgColor
+        card.layer?.cornerRadius = 14
+        card.layer?.borderWidth = 1
+        card.layer?.borderColor = currentTheme.cardBorder.cgColor
+        card.translatesAutoresizingMaskIntoConstraints = false
+        syncCardViews.append(card)
+        return card
+    }
+
+    private func syncCardTitle(_ text: String) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        label.textColor = .secondaryLabelColor
+        return label
+    }
+
+    private func syncBodyLabel(_ text: String, size: CGFloat = 12.5,
+                               weight: NSFont.Weight = .regular,
+                               color: NSColor = .labelColor) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.font = NSFont.systemFont(ofSize: size, weight: weight)
+        label.textColor = color
+        return label
+    }
+
+    private func syncWrappingLabel(_ text: String, size: CGFloat = 11.5, maxWidth: CGFloat = 360) -> NSTextField {
+        let label = NSTextField(wrappingLabelWithString: text)
+        label.font = NSFont.systemFont(ofSize: size)
+        label.textColor = .secondaryLabelColor
+        label.preferredMaxLayoutWidth = maxWidth
+        return label
+    }
+
+    // The two sign-in buttons from the mocks — Apple above
+    // Google at equal size (Apple's HIG order), shared by
+    // the panel card and the Settings tab. Text-only in this
+    // skeleton: the provider glyphs are brand artwork the
+    // single-file build doesn't carry yet.
+    private func socialButton(title: String, background: NSColor, foreground: NSColor,
+                              bordered: Bool, action: Selector) -> NSButton {
+        let button = NSButton()
+        button.attributedTitle = NSAttributedString(string: title, attributes: [
+            .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+            .foregroundColor: foreground
+        ])
+        button.isBordered = false
+        button.bezelStyle = .inline
+        button.wantsLayer = true
+        button.layer?.backgroundColor = background.cgColor
+        button.layer?.cornerRadius = 8
+        if bordered {
+            button.layer?.borderWidth = 1
+            button.layer?.borderColor = NSColor(white: 0, alpha: 0.14).cgColor
+        }
+        button.target = self
+        button.action = action
+        button.heightAnchor.constraint(equalToConstant: 34).isActive = true
+        return button
+    }
+
+    func accountDisplayName(_ identity: AuthIdentity?) -> String {
+        guard let identity else { return "Not signed in" }
+        return identity.name.isEmpty ? "ClipKeep account" : identity.name
+    }
+
+    func accountInitial(for identity: AuthIdentity) -> String {
+        let source = identity.name.isEmpty ? identity.email : identity.name
+        return source.first.map { String($0).uppercased() } ?? "?"
+    }
+
+    func buildSyncView(in content: NSView) {
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.isHidden = true
+        content.addSubview(container)
+        syncView = container
+
+        // Mode row: the ‹ Clips back link, the SYNC eyebrow,
+        // and the esc keycap — the way back is never a guess.
+        let back = NSButton(title: "‹ Clips", target: self, action: #selector(closeSyncViewClicked))
+        back.bezelStyle = .inline
+        back.isBordered = false
+        back.font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
+        back.contentTintColor = NSColor(red: 0, green: 0.478, blue: 1, alpha: 1)
+        let eyebrow = NSTextField(labelWithString: "SYNC")
+        eyebrow.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        eyebrow.textColor = .secondaryLabelColor
+        let escLabel = NSTextField(labelWithString: "esc")
+        escLabel.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        escLabel.textColor = .secondaryLabelColor
+        escLabel.alignment = .center
+        escLabel.translatesAutoresizingMaskIntoConstraints = false
+        let escChip = NSView()
+        escChip.wantsLayer = true
+        escChip.layer?.cornerRadius = 5
+        escChip.layer?.backgroundColor = NSColor(white: 0, alpha: 0.06).cgColor
+        escChip.layer?.borderWidth = 1
+        escChip.layer?.borderColor = NSColor(white: 0, alpha: 0.10).cgColor
+        escChip.translatesAutoresizingMaskIntoConstraints = false
+        escChip.addSubview(escLabel)
+        NSLayoutConstraint.activate([
+            escLabel.centerXAnchor.constraint(equalTo: escChip.centerXAnchor),
+            escLabel.centerYAnchor.constraint(equalTo: escChip.centerYAnchor),
+            escChip.widthAnchor.constraint(equalToConstant: 32),
+            escChip.heightAnchor.constraint(equalToConstant: 20)
+        ])
+        let spacerA = NSView()
+        let spacerB = NSView()
+        spacerA.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        spacerB.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let modeRow = NSStackView(views: [back, spacerA, eyebrow, spacerB, escChip])
+        modeRow.orientation = .horizontal
+        modeRow.alignment = .centerY
+        modeRow.distribution = .fill
+        modeRow.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(modeRow)
+        spacerA.widthAnchor.constraint(equalTo: spacerB.widthAnchor).isActive = true
+
+        // Signed-in body: the hero card over three cards.
+        let signedIn = NSView()
+        signedIn.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(signedIn)
+        syncSignedInView = signedIn
+
+        let hero = syncCard()
+        signedIn.addSubview(hero)
+        heroRingView = NSView()
+        heroRingView.wantsLayer = true
+        heroRingView.layer?.cornerRadius = 22
+        heroRingView.layer?.borderWidth = 2
+        heroRingView.translatesAutoresizingMaskIntoConstraints = false
+        hero.addSubview(heroRingView)
+        heroGlyphView = NSImageView()
+        heroGlyphView.translatesAutoresizingMaskIntoConstraints = false
+        heroRingView.addSubview(heroGlyphView)
+        heroStatusLabel = NSTextField(labelWithString: "")
+        heroStatusLabel.font = NSFont.systemFont(ofSize: 19, weight: .semibold)
+        heroDetailLabel = NSTextField(labelWithString: "")
+        heroDetailLabel.font = NSFont.systemFont(ofSize: 12)
+        heroDetailLabel.textColor = .secondaryLabelColor
+        let heroText = NSStackView(views: [heroStatusLabel, heroDetailLabel])
+        heroText.orientation = .vertical
+        heroText.alignment = .leading
+        heroText.spacing = 2
+        heroText.translatesAutoresizingMaskIntoConstraints = false
+        hero.addSubview(heroText)
+        heroToggle = NSSwitch()
+        heroToggle.target = self
+        heroToggle.action = #selector(syncToggleChanged(_:))
+        heroToggle.translatesAutoresizingMaskIntoConstraints = false
+        hero.addSubview(heroToggle)
+        heroSyncNowButton = NSButton(title: "Sync Now", target: self, action: #selector(syncNowClicked))
+        heroSyncNowButton.bezelStyle = .rounded
+        heroSyncNowButton.translatesAutoresizingMaskIntoConstraints = false
+        hero.addSubview(heroSyncNowButton)
+        NSLayoutConstraint.activate([
+            heroRingView.leadingAnchor.constraint(equalTo: hero.leadingAnchor, constant: Self.spaceCardPad),
+            heroRingView.centerYAnchor.constraint(equalTo: hero.centerYAnchor),
+            heroRingView.widthAnchor.constraint(equalToConstant: 44),
+            heroRingView.heightAnchor.constraint(equalToConstant: 44),
+            heroGlyphView.centerXAnchor.constraint(equalTo: heroRingView.centerXAnchor),
+            heroGlyphView.centerYAnchor.constraint(equalTo: heroRingView.centerYAnchor),
+            heroGlyphView.widthAnchor.constraint(equalToConstant: 20),
+            heroGlyphView.heightAnchor.constraint(equalToConstant: 20),
+            heroText.leadingAnchor.constraint(equalTo: heroRingView.trailingAnchor, constant: 12),
+            heroText.centerYAnchor.constraint(equalTo: hero.centerYAnchor),
+            heroText.trailingAnchor.constraint(lessThanOrEqualTo: heroToggle.leadingAnchor, constant: -16),
+            heroSyncNowButton.trailingAnchor.constraint(equalTo: hero.trailingAnchor, constant: -Self.spaceCardPad),
+            heroSyncNowButton.centerYAnchor.constraint(equalTo: hero.centerYAnchor),
+            heroToggle.trailingAnchor.constraint(equalTo: heroSyncNowButton.leadingAnchor, constant: -10),
+            heroToggle.centerYAnchor.constraint(equalTo: hero.centerYAnchor)
+        ])
+
+        // Account card: identity, the Connect rows (explicit
+        // linking while signed in — RESEARCH-NOTES §3), and
+        // the account actions.
+        let accountCard = syncCard()
+        let accountStack = NSStackView()
+        accountStack.orientation = .vertical
+        accountStack.alignment = .leading
+        accountStack.spacing = 7
+        accountStack.translatesAutoresizingMaskIntoConstraints = false
+        accountCard.addSubview(accountStack)
+        accountStack.addArrangedSubview(syncCardTitle("ACCOUNT"))
+        syncIdentityLabel = syncBodyLabel("", size: 13.5, weight: .semibold)
+        accountStack.addArrangedSubview(syncIdentityLabel)
+        syncEmailLabel = syncBodyLabel("", size: 11.5, color: .secondaryLabelColor)
+        accountStack.addArrangedSubview(syncEmailLabel)
+        let connectGoogle = NSButton(title: "Connect Google", target: self, action: #selector(connectGoogleClicked(_:)))
+        connectGoogle.bezelStyle = .rounded
+        connectGoogle.controlSize = .small
+        accountStack.addArrangedSubview(connectGoogle)
+        let connectApple = NSButton(title: "Connect Apple", target: self, action: #selector(connectAppleClicked(_:)))
+        connectApple.bezelStyle = .rounded
+        connectApple.controlSize = .small
+        accountStack.addArrangedSubview(connectApple)
+        let signOut = NSButton(title: "Sign Out", target: self, action: #selector(signOutClicked))
+        signOut.bezelStyle = .rounded
+        signOut.controlSize = .small
+        accountStack.addArrangedSubview(signOut)
+        let deleteAccount = NSButton(title: "Delete Account…", target: self, action: #selector(deleteAccountClicked))
+        deleteAccount.bezelStyle = .inline
+        deleteAccount.isBordered = false
+        deleteAccount.contentTintColor = .systemRed
+        deleteAccount.font = NSFont.systemFont(ofSize: 12)
+        accountStack.addArrangedSubview(deleteAccount)
+
+        // Devices card: this Mac, and an honest empty line
+        // for the rest until the sync engine exists.
+        let devicesCard = syncCard()
+        let devicesStack = NSStackView()
+        devicesStack.orientation = .vertical
+        devicesStack.alignment = .leading
+        devicesStack.spacing = 7
+        devicesStack.translatesAutoresizingMaskIntoConstraints = false
+        devicesCard.addSubview(devicesStack)
+        devicesStack.addArrangedSubview(syncCardTitle("DEVICES"))
+        let deviceDot = NSView()
+        deviceDot.wantsLayer = true
+        deviceDot.layer?.cornerRadius = 4
+        deviceDot.layer?.backgroundColor = NSColor.systemGreen.cgColor
+        deviceDot.widthAnchor.constraint(equalToConstant: 8).isActive = true
+        deviceDot.heightAnchor.constraint(equalToConstant: 8).isActive = true
+        let deviceRow = NSStackView(views: [deviceDot,
+                                            syncBodyLabel("This Mac", size: 12.5, weight: .medium),
+                                            syncBodyLabel("this device", size: 11, color: .secondaryLabelColor)])
+        deviceRow.orientation = .horizontal
+        deviceRow.alignment = .centerY
+        deviceRow.spacing = 8
+        devicesStack.addArrangedSubview(deviceRow)
+        devicesStack.addArrangedSubview(syncWrappingLabel("Other devices appear here once sync is running."))
+
+        // Privacy & Data card: the promise, as a card.
+        let privacyCard = syncCard()
+        let privacyStack = NSStackView()
+        privacyStack.orientation = .vertical
+        privacyStack.alignment = .leading
+        privacyStack.spacing = 7
+        privacyStack.translatesAutoresizingMaskIntoConstraints = false
+        privacyCard.addSubview(privacyStack)
+        privacyStack.addArrangedSubview(syncCardTitle("PRIVACY & DATA"))
+        let lockGlyph = NSImageView()
+        lockGlyph.image = NSImage(systemSymbolName: "lock.fill", accessibilityDescription: nil)
+        lockGlyph.contentTintColor = .secondaryLabelColor
+        lockGlyph.widthAnchor.constraint(equalToConstant: 13).isActive = true
+        lockGlyph.heightAnchor.constraint(equalToConstant: 13).isActive = true
+        let promiseRow = NSStackView(views: [lockGlyph,
+                                             syncBodyLabel("Sensitive clips never sync", size: 12.5, weight: .semibold)])
+        promiseRow.orientation = .horizontal
+        promiseRow.alignment = .centerY
+        promiseRow.spacing = 6
+        privacyStack.addArrangedSubview(promiseRow)
+        privacyStack.addArrangedSubview(syncWrappingLabel("Clips marked sensitive and copies from password managers never leave this device."))
+
+        for (card, stack) in [(accountCard, accountStack), (devicesCard, devicesStack), (privacyCard, privacyStack)] {
+            NSLayoutConstraint.activate([
+                stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: Self.spaceCardPad),
+                stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -Self.spaceCardPad),
+                stack.topAnchor.constraint(equalTo: card.topAnchor, constant: Self.spaceCardPad)
+            ])
+        }
+
+        let cardsRow = NSStackView(views: [accountCard, devicesCard, privacyCard])
+        cardsRow.orientation = .horizontal
+        cardsRow.alignment = .top
+        cardsRow.distribution = .fillEqually
+        cardsRow.spacing = Self.spaceCardGap
+        cardsRow.translatesAutoresizingMaskIntoConstraints = false
+        signedIn.addSubview(cardsRow)
+
+        // Signed-out body: the centred invitation card from
+        // the mocks.
+        let signedOut = NSView()
+        signedOut.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(signedOut)
+        syncSignedOutView = signedOut
+
+        let inviteCard = syncCard()
+        signedOut.addSubview(inviteCard)
+        let invite = NSStackView()
+        invite.orientation = .vertical
+        invite.alignment = .leading
+        invite.spacing = 10
+        invite.translatesAutoresizingMaskIntoConstraints = false
+        inviteCard.addSubview(invite)
+        let headline = NSTextField(labelWithString: "Your clipboard, on every device")
+        headline.font = NSFont.systemFont(ofSize: 16.5, weight: .semibold)
+        invite.addArrangedSubview(headline)
+        invite.addArrangedSubview(syncWrappingLabel("Sign in to sync this Mac's history with ClipKeep on Android, iOS and Web. Sensitive clips never sync.", size: 12, maxWidth: 416))
+        let appleButton = socialButton(title: "Sign in with Apple", background: .black, foreground: .white,
+                                       bordered: false, action: #selector(signInAppleClicked(_:)))
+        invite.addArrangedSubview(appleButton)
+        let googleButton = socialButton(title: "Sign in with Google", background: .white,
+                                        foreground: NSColor(white: 0.2, alpha: 1),
+                                        bordered: true, action: #selector(signInGoogleClicked(_:)))
+        invite.addArrangedSubview(googleButton)
+        let lineA = NSView()
+        lineA.wantsLayer = true
+        lineA.layer?.backgroundColor = NSColor(white: 0, alpha: 0.12).cgColor
+        lineA.heightAnchor.constraint(equalToConstant: 1).isActive = true
+        lineA.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let lineB = NSView()
+        lineB.wantsLayer = true
+        lineB.layer?.backgroundColor = NSColor(white: 0, alpha: 0.12).cgColor
+        lineB.heightAnchor.constraint(equalToConstant: 1).isActive = true
+        lineB.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let orLabel = NSTextField(labelWithString: "or")
+        orLabel.font = NSFont.systemFont(ofSize: 11)
+        orLabel.textColor = .secondaryLabelColor
+        let divider = NSStackView(views: [lineA, orLabel, lineB])
+        divider.orientation = .horizontal
+        divider.alignment = .centerY
+        divider.distribution = .fill
+        divider.spacing = 10
+        invite.addArrangedSubview(divider)
+        let emailField = NSTextField()
+        emailField.placeholderString = "Email"
+        emailField.font = NSFont.systemFont(ofSize: 12.5)
+        emailField.widthAnchor.constraint(equalToConstant: 240).isActive = true
+        let emailButton = NSButton(title: "Email me a code", target: self, action: #selector(signInEmailClicked(_:)))
+        emailButton.bezelStyle = .rounded
+        let emailRow = NSStackView(views: [emailField, emailButton])
+        emailRow.orientation = .horizontal
+        emailRow.alignment = .centerY
+        emailRow.spacing = 9
+        invite.addArrangedSubview(emailRow)
+        let lockSmall = NSImageView()
+        lockSmall.image = NSImage(systemSymbolName: "lock.fill", accessibilityDescription: nil)
+        lockSmall.contentTintColor = .secondaryLabelColor
+        lockSmall.widthAnchor.constraint(equalToConstant: 11).isActive = true
+        lockSmall.heightAnchor.constraint(equalToConstant: 11).isActive = true
+        let reassuranceRow = NSStackView(views: [lockSmall,
+                                                 syncBodyLabel("ClipKeep stays fully local if you never sign in", size: 11.5, color: .secondaryLabelColor)])
+        reassuranceRow.orientation = .horizontal
+        reassuranceRow.alignment = .centerY
+        reassuranceRow.spacing = 6
+        invite.addArrangedSubview(reassuranceRow)
+        for view in [appleButton, googleButton, divider, emailRow] as [NSView] {
+            view.widthAnchor.constraint(equalTo: invite.widthAnchor).isActive = true
+        }
+
+        NSLayoutConstraint.activate([
+            container.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: Self.spaceMargin),
+            container.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -Self.spaceMargin),
+            container.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 12),
+            container.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -Self.spaceMargin),
+
+            modeRow.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            modeRow.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            modeRow.topAnchor.constraint(equalTo: container.topAnchor),
+
+            signedIn.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            signedIn.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            signedIn.topAnchor.constraint(equalTo: modeRow.bottomAnchor, constant: 12),
+            signedIn.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+
+            signedOut.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            signedOut.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            signedOut.topAnchor.constraint(equalTo: modeRow.bottomAnchor, constant: 12),
+            signedOut.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+
+            hero.leadingAnchor.constraint(equalTo: signedIn.leadingAnchor),
+            hero.trailingAnchor.constraint(equalTo: signedIn.trailingAnchor),
+            hero.topAnchor.constraint(equalTo: signedIn.topAnchor),
+            hero.heightAnchor.constraint(equalToConstant: 92),
+
+            cardsRow.leadingAnchor.constraint(equalTo: signedIn.leadingAnchor),
+            cardsRow.trailingAnchor.constraint(equalTo: signedIn.trailingAnchor),
+            cardsRow.topAnchor.constraint(equalTo: hero.bottomAnchor, constant: Self.spaceCardGap),
+            cardsRow.bottomAnchor.constraint(equalTo: signedIn.bottomAnchor),
+
+            invite.leadingAnchor.constraint(equalTo: inviteCard.leadingAnchor, constant: 22),
+            invite.trailingAnchor.constraint(equalTo: inviteCard.trailingAnchor, constant: -22),
+            invite.topAnchor.constraint(equalTo: inviteCard.topAnchor, constant: 20),
+            invite.bottomAnchor.constraint(equalTo: inviteCard.bottomAnchor, constant: -20),
+            inviteCard.centerXAnchor.constraint(equalTo: signedOut.centerXAnchor),
+            inviteCard.centerYAnchor.constraint(equalTo: signedOut.centerYAnchor),
+            inviteCard.widthAnchor.constraint(equalToConstant: 460)
+        ])
+    }
+
+    func refreshSyncView() {
+        refreshAvatarButton()
+        guard syncView != nil else { return }
+        let identity = auth.session?.identity
+        syncSignedInView.isHidden = identity == nil
+        syncSignedOutView.isHidden = identity != nil
+
+        // Hero states for the skeleton: live sync doesn't
+        // exist yet, so the detail line says when it arrives
+        // instead of inventing a last-sync time.
+        let status: String
+        let glyph: String
+        let tint: NSColor
+        var detail = "Sync launches with ClipKeep Cloud"
+        if case .error(let message) = auth.state {
+            status = "Error"
+            detail = message
+            glyph = "exclamationmark.triangle.fill"
+            tint = .systemOrange
+        } else if identity != nil && syncEnabled {
+            status = "Signed in"
+            glyph = "checkmark"
+            tint = .systemGreen
+        } else {
+            status = "Sync off"
+            glyph = "pause.fill"
+            tint = .systemGray
+        }
+        heroStatusLabel.stringValue = status
+        heroDetailLabel.stringValue = detail
+        heroGlyphView.image = NSImage(systemSymbolName: glyph, accessibilityDescription: nil)
+        heroGlyphView.contentTintColor = tint
+        heroRingView.layer?.borderColor = tint.cgColor
+        heroToggle.state = syncEnabled ? .on : .off
+        // Sync Now stays disabled until the engine exists —
+        // an enabled button that does nothing would be a lie.
+        heroSyncNowButton.isEnabled = false
+
+        syncIdentityLabel.stringValue = accountDisplayName(identity)
+        syncEmailLabel.stringValue = identity?.email ?? ""
+    }
+
+    func refreshAvatarButton() {
+        guard avatarButton != nil else { return }
+        let brandOrange = NSColor(red: 0.894, green: 0.341, blue: 0.180, alpha: 1)   // #e4572e
+        if let identity = auth.session?.identity {
+            avatarButton.normalBG = brandOrange
+            avatarButton.hoverBG = NSColor(red: 0.855, green: 0.310, blue: 0.160, alpha: 1)
+            avatarButton.pressedBG = NSColor(red: 0.780, green: 0.275, blue: 0.140, alpha: 1)
+            avatarButton.attributedTitle = NSAttributedString(string: accountInitial(for: identity), attributes: [
+                .font: NSFont.systemFont(ofSize: 13, weight: .bold),
+                .foregroundColor: NSColor.white
+            ])
+            avatarButton.image = nil
+        } else {
+            avatarButton.normalBG = NSColor(white: 0.62, alpha: 1)
+            avatarButton.hoverBG = NSColor(white: 0.55, alpha: 1)
+            avatarButton.pressedBG = NSColor(white: 0.48, alpha: 1)
+            avatarButton.attributedTitle = NSAttributedString(string: "")
+            avatarButton.imagePosition = .imageOnly
+            avatarButton.image = NSImage(systemSymbolName: "person.fill", accessibilityDescription: "Account")?
+                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold))
+        }
+        avatarButton.chromeBorderColor = syncOpen ? NSColor(red: 0, green: 0.478, blue: 1, alpha: 1) : nil
+        avatarButton.refreshChrome()
+        if syncOpen { avatarButton.layer?.borderWidth = 2 }
+        let dot: NSColor
+        if case .error = auth.state {
+            dot = .systemOrange
+        } else if auth.session != nil && syncEnabled {
+            dot = .systemGreen
+        } else {
+            dot = NSColor(white: 0.66, alpha: 1)
+        }
+        avatarDot.layer?.backgroundColor = dot.cgColor
+        avatarDot.layer?.borderColor = currentTheme.cardBG.cgColor
+    }
+
+    func setSyncView(open: Bool) {
+        syncOpen = open
+        applySyncBodyVisibility()
+        refreshSyncView()
+        if open { auth.refreshIfNeeded() }
+    }
+
+    // The body swap: the Sync view and the feed chrome are
+    // never visible at once. refreshList re-asserts this
+    // after a rebuild (it manages the stack bar, sort shell
+    // and empty state visibility itself), so a copy landing
+    // while the Sync view is open can't resurrect the feed
+    // underneath it.
+    func applySyncBodyVisibility() {
+        guard syncView != nil else { return }
+        syncView.isHidden = !syncOpen
+        pillTabs.isHidden = syncOpen
+        for shell in toolbarShells { shell.isHidden = syncOpen }
+        stackBar.isHidden = syncOpen || stackIDs.isEmpty
+        scrollView.isHidden = syncOpen
+        if syncOpen {
+            scrollFade.isHidden = true
+            emptyStateView.isHidden = true
+            updateStrip.isHidden = true
+        } else {
+            sortShell.isHidden = (pillTabs?.selectedType ?? "all") != "color"
+            emptyStateView.isHidden = !visibleItems().isEmpty
+            updateScrollFade()
+            refreshUpdateStrip()
+        }
+    }
+
+    @objc func avatarClicked() {
+        setSyncView(open: !syncOpen)
+    }
+
+    @objc func closeSyncViewClicked() {
+        setSyncView(open: false)
+    }
+
+    @objc func syncToggleChanged(_ sender: NSSwitch) {
+        auth.anchorWindow = sender.window
+        syncEnabledChanged(sender.state == .on)
+        sender.state = syncEnabled ? .on : .off
+    }
+
+    @objc func syncNowClicked() {
+        // Disabled in the skeleton (see refreshSyncView) —
+        // the engine wires this when ClipKeep Cloud lands.
+    }
+
+    // Turning sync on while signed out prompts sign-in: the
+    // toggle stays off and the sign-in path takes over (the
+    // "aren't live yet" alert while accounts are off; the
+    // hosted UI once configured).
+    func syncEnabledChanged(_ on: Bool) {
+        if on, auth.session == nil {
+            syncEnabled = false
+            refreshSyncView()
+            refreshSettingsAccount()
+            auth.signIn(provider: .email)
+            return
+        }
+        syncEnabled = on
+        refreshSyncView()
+        refreshSettingsAccount()
+    }
+
+    @objc func signInAppleClicked(_ sender: NSButton) {
+        auth.anchorWindow = sender.window
+        auth.signIn(provider: .apple)
+    }
+
+    @objc func signInGoogleClicked(_ sender: NSButton) {
+        auth.anchorWindow = sender.window
+        auth.signIn(provider: .google)
+    }
+
+    @objc func signInEmailClicked(_ sender: NSButton) {
+        auth.anchorWindow = sender.window
+        auth.signIn(provider: .email)
+    }
+
+    @objc func connectGoogleClicked(_ sender: NSButton) {
+        auth.anchorWindow = sender.window
+        auth.signIn(provider: .google)
+    }
+
+    @objc func connectAppleClicked(_ sender: NSButton) {
+        auth.anchorWindow = sender.window
+        auth.signIn(provider: .apple)
+    }
+
+    @objc func signOutClicked() {
+        auth.signOut()
+    }
+
+    @objc func deleteAccountClicked() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Delete your ClipKeep account?"
+        alert.informativeText = "This permanently deletes your account and everything synced to ClipKeep Cloud. Your local history on this Mac is not touched."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Delete Account")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        auth.deleteAccount()
+    }
+
+    func showAccountsNotLiveAlert() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Accounts aren't live yet"
+        alert.informativeText = "Sign-in turns on when ClipKeep Cloud launches. ClipKeep stays fully local until then."
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    func showAppleUnavailableAlert() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Apple sign-in isn't available yet"
+        alert.informativeText = "Apple sign-in arrives once the Apple Developer enrolment is complete — use Google or an email code for now."
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    func showDeleteUnavailableAlert() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Account deletion isn't available yet"
+        alert.informativeText = "Account deletion will be enabled when sync launches."
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     // MARK: Filtering + list rendering
@@ -3383,6 +4595,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             self?.updateScrollFade()
             self?.centerPanelContent()
         }
+        // The Sync view owns the body while it's open
+        // (v2.18.0): the visibility writes above (stack bar,
+        // sort shell, empty state) must not resurrect the
+        // feed underneath it.
+        if syncOpen { applySyncBodyVisibility() }
     }
 
     // Deterministic height for a wrapping card label (v2.15.5).
@@ -4717,6 +5934,125 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         eItem.view = excluded
         tabs.addTabViewItem(eItem)
 
+        // Account (v2.18.0) — the Form design: the same
+        // sign-in controls and identity rows the panel's Sync
+        // view carries, wired to the one AuthManager.
+        // Signed-out and signed-in are two stacked containers;
+        // refreshSettingsAccount swaps them.
+        let account = NSView()
+        let acct = settingsStack(in: account)
+
+        let acctOut = NSStackView()
+        acctOut.orientation = .vertical
+        acctOut.alignment = .leading
+        acctOut.spacing = 10
+        let acctHeadline = NSTextField(labelWithString: "ClipKeep Account")
+        acctHeadline.font = NSFont.boldSystemFont(ofSize: 13)
+        acctOut.addArrangedSubview(acctHeadline)
+        let acctExplainer = NSTextField(wrappingLabelWithString: "Sign in to sync your clipboard history across this Mac, Android, iOS and Web. Sensitive clips never sync — and signed out, ClipKeep stays fully local.")
+        acctExplainer.font = NSFont.systemFont(ofSize: 12)
+        acctExplainer.textColor = .secondaryLabelColor
+        acctExplainer.preferredMaxLayoutWidth = 440
+        acctOut.addArrangedSubview(acctExplainer)
+        let acctApple = socialButton(title: "Sign in with Apple", background: .black, foreground: .white,
+                                     bordered: false, action: #selector(signInAppleClicked(_:)))
+        acctOut.addArrangedSubview(acctApple)
+        let acctGoogle = socialButton(title: "Sign in with Google", background: .white,
+                                      foreground: NSColor(white: 0.2, alpha: 1),
+                                      bordered: true, action: #selector(signInGoogleClicked(_:)))
+        acctOut.addArrangedSubview(acctGoogle)
+        let acctEmailField = NSTextField()
+        acctEmailField.placeholderString = "Email"
+        acctEmailField.widthAnchor.constraint(equalToConstant: 220).isActive = true
+        let acctEmailButton = NSButton(title: "Email me a code", target: self, action: #selector(signInEmailClicked(_:)))
+        acctEmailButton.bezelStyle = .rounded
+        let acctEmailRow = NSStackView(views: [acctEmailField, acctEmailButton])
+        acctEmailRow.orientation = .horizontal
+        acctEmailRow.alignment = .centerY
+        acctEmailRow.spacing = 8
+        acctOut.addArrangedSubview(acctEmailRow)
+        let acctReassurance = NSTextField(labelWithString: "ClipKeep stays fully local if you never sign in.")
+        acctReassurance.font = NSFont.systemFont(ofSize: 11)
+        acctReassurance.textColor = .secondaryLabelColor
+        acctOut.addArrangedSubview(acctReassurance)
+        acct.addArrangedSubview(acctOut)
+        settingsAccountSignedOutView = acctOut
+
+        let acctIn = NSStackView()
+        acctIn.orientation = .vertical
+        acctIn.alignment = .leading
+        acctIn.spacing = 10
+        let acctAvatar = NSView()
+        acctAvatar.wantsLayer = true
+        acctAvatar.layer?.cornerRadius = 18
+        acctAvatar.layer?.backgroundColor = NSColor(red: 0.894, green: 0.341, blue: 0.180, alpha: 1).cgColor
+        acctAvatar.widthAnchor.constraint(equalToConstant: 36).isActive = true
+        acctAvatar.heightAnchor.constraint(equalToConstant: 36).isActive = true
+        let acctAvatarLabel = NSTextField(labelWithString: "")
+        acctAvatarLabel.font = NSFont.systemFont(ofSize: 15, weight: .bold)
+        acctAvatarLabel.textColor = .white
+        acctAvatarLabel.alignment = .center
+        acctAvatarLabel.translatesAutoresizingMaskIntoConstraints = false
+        acctAvatar.addSubview(acctAvatarLabel)
+        NSLayoutConstraint.activate([
+            acctAvatarLabel.centerXAnchor.constraint(equalTo: acctAvatar.centerXAnchor),
+            acctAvatarLabel.centerYAnchor.constraint(equalTo: acctAvatar.centerYAnchor)
+        ])
+        settingsAccountAvatarLabel = acctAvatarLabel
+        let acctName = NSTextField(labelWithString: "")
+        acctName.font = NSFont.boldSystemFont(ofSize: 13)
+        settingsAccountNameLabel = acctName
+        let acctEmail = NSTextField(labelWithString: "")
+        acctEmail.font = NSFont.systemFont(ofSize: 11.5)
+        acctEmail.textColor = .secondaryLabelColor
+        settingsAccountEmailLabel = acctEmail
+        let acctIdentityText = NSStackView(views: [acctName, acctEmail])
+        acctIdentityText.orientation = .vertical
+        acctIdentityText.alignment = .leading
+        acctIdentityText.spacing = 1
+        let acctHeader = NSStackView(views: [acctAvatar, acctIdentityText])
+        acctHeader.orientation = .horizontal
+        acctHeader.alignment = .centerY
+        acctHeader.spacing = 10
+        acctIn.addArrangedSubview(acctHeader)
+        let acctSync = NSButton(checkboxWithTitle: "Sync history across devices", target: self, action: #selector(settingsSyncToggled(_:)))
+        settingsSyncCheckbox = acctSync
+        acctIn.addArrangedSubview(acctSync)
+        let acctStatusLabel = NSTextField(labelWithString: "")
+        settingsSyncStatusLabel = acctStatusLabel
+        let acctStatusRow = NSStackView(views: [NSTextField(labelWithString: "Sync status:"), acctStatusLabel])
+        acctStatusRow.orientation = .horizontal
+        acctStatusRow.spacing = 8
+        acctIn.addArrangedSubview(acctStatusRow)
+        acctIn.addArrangedSubview(NSTextField(labelWithString: "Devices: This Mac (this device)"))
+        let acctConnectGoogle = NSButton(title: "Connect Google", target: self, action: #selector(connectGoogleClicked(_:)))
+        acctConnectGoogle.bezelStyle = .rounded
+        let acctConnectApple = NSButton(title: "Connect Apple", target: self, action: #selector(connectAppleClicked(_:)))
+        acctConnectApple.bezelStyle = .rounded
+        let acctConnectRow = NSStackView(views: [acctConnectGoogle, acctConnectApple])
+        acctConnectRow.orientation = .horizontal
+        acctConnectRow.spacing = 8
+        acctIn.addArrangedSubview(acctConnectRow)
+        let acctSignOut = NSButton(title: "Sign Out", target: self, action: #selector(signOutClicked))
+        acctSignOut.bezelStyle = .rounded
+        let acctDelete = NSButton(title: "Delete Account…", target: self, action: #selector(deleteAccountClicked))
+        acctDelete.bezelStyle = .rounded
+        let acctActions = NSStackView(views: [acctSignOut, acctDelete])
+        acctActions.orientation = .horizontal
+        acctActions.spacing = 8
+        acctIn.addArrangedSubview(acctActions)
+        acct.addArrangedSubview(acctIn)
+        settingsAccountSignedInView = acctIn
+
+        // The social buttons span the tab's content width.
+        acctApple.widthAnchor.constraint(equalTo: acctOut.widthAnchor).isActive = true
+        acctGoogle.widthAnchor.constraint(equalTo: acctOut.widthAnchor).isActive = true
+
+        let acctItem = NSTabViewItem()
+        acctItem.label = "Account"
+        acctItem.view = account
+        tabs.addTabViewItem(acctItem)
+
         settingsWindow = window
     }
 
@@ -4739,6 +6075,38 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         settingsRTCheckbox?.state = UserDefaults.standard.bool(forKey: "ClipKeepReduceTransparency") ? .on : .off
         refreshSettingsUpdateStatus()
         refreshSettingsExclusionsList()
+        refreshSettingsAccount()
+    }
+
+    // The Account tab mirrors the one AuthManager (v2.18.0):
+    // signed-out shows the sign-in controls, signed-in the
+    // identity, the sync toggle (the same ClipKeepSyncEnabled
+    // key the panel's hero switch writes), status, devices,
+    // the Connect rows and the account actions.
+    func refreshSettingsAccount() {
+        guard let out = settingsAccountSignedOutView, let inn = settingsAccountSignedInView else { return }
+        let identity = auth.session?.identity
+        out.isHidden = identity != nil
+        inn.isHidden = identity == nil
+        if let identity {
+            settingsAccountAvatarLabel?.stringValue = accountInitial(for: identity)
+            settingsAccountNameLabel?.stringValue = accountDisplayName(identity)
+            settingsAccountEmailLabel?.stringValue = identity.email
+        }
+        settingsSyncCheckbox?.state = syncEnabled ? .on : .off
+        settingsSyncStatusLabel?.stringValue = syncStatusText()
+    }
+
+    func syncStatusText() -> String {
+        if case .error(let message) = auth.state { return "Error — \(message)" }
+        guard auth.session != nil else { return "Not signed in" }
+        return syncEnabled ? "Signed in — sync launches with ClipKeep Cloud" : "Signed in — sync off"
+    }
+
+    @objc func settingsSyncToggled(_ sender: NSButton) {
+        auth.anchorWindow = sender.window
+        syncEnabledChanged(sender.state == .on)
+        sender.state = syncEnabled ? .on : .off
     }
 
     func refreshSettingsUpdateStatus() {
@@ -4852,6 +6220,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         if panel.isVisible {
             panel.orderOut(nil)
         } else {
+            // Reopening always lands on the feed (v2.18.0):
+            // the Sync view is a mode, not a place the panel
+            // remembers being in.
+            if syncOpen { setSyncView(open: false) }
             refreshList()
             applyFixedPanelFrame()
             panel.makeKeyAndOrderFront(nil)
@@ -5087,6 +6459,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                 return nil
             }
             let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            // Esc in the Sync view returns to the feed first
+            // (v2.18.0) — before the clear-search/close chain
+            // below. While the Sync view is open the feed is
+            // otherwise inert: every other key passes through
+            // untouched (the invitation card's email field
+            // needs its keystrokes, and the hidden feed must
+            // not navigate, paste or delete behind the view).
+            if self.syncOpen {
+                if event.keyCode == 53, mods.isEmpty {
+                    self.setSyncView(open: false)
+                    return nil
+                }
+                return event
+            }
             // Esc: clear a non-empty search first; only an Esc
             // with an already-empty search closes the panel.
             if event.keyCode == 53, mods.isEmpty {
