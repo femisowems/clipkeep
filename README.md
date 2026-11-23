@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/femisowems/clipkeep/actions/workflows/build.yml"><img src="https://github.com/femisowems/clipkeep/actions/workflows/build.yml/badge.svg" alt="Build status"></a>
-  <a href="https://github.com/femisowems/clipkeep/releases"><img src="https://img.shields.io/badge/version-v2.16.5-e4572e" alt="Latest version"></a>
+  <a href="https://github.com/femisowems/clipkeep/releases"><img src="https://img.shields.io/badge/version-v2.17.0-e4572e" alt="Latest version"></a>
   <a href="https://github.com/femisowems/clipkeep/releases"><img src="https://img.shields.io/github/downloads/femisowems/clipkeep/total" alt="Downloads"></a>
   <a href="https://github.com/femisowems/clipkeep/blob/main/LICENSE"><img src="https://img.shields.io/github/license/femisowems/clipkeep" alt="License"></a>
 </p>
@@ -24,7 +24,7 @@ copy never leaves your Mac.
 *(It keeps what you copy, for safekeeping.)*
 
 > 🚧 **Work in progress** — ClipKeep is under active development
-> (current release: **v2.16.5**). Features, behaviour and this README
+> (current release: **v2.17.0**). Features, behaviour and this README
 > may change between versions, and things may break.
 
 ---
@@ -244,20 +244,22 @@ designed around that limit instead:
   and images to ClipKeep from any app, with an Android Quick Settings
   tile for one-tap saving of what's on the clipboard right now.
 - **Your Mac history, in your pocket** — a synced viewer for finding
-  a clip on your phone and copying it back. Sync starts with a
-  Google Drive folder; end-to-end encrypted sync is the longer-term
-  plan. Password-manager and other sensitive clips never sync.
-- **Profiles and sync** — an optional ClipKeep profile is planned
-  alongside the companion: sign in on your devices and your history
-  stays in step across Mac and phone, with end-to-end encrypted
-  sync as the design goal. Profiles are opt-in — the Mac app stays
-  fully local and account-free if you never turn sync on.
+  a clip on your phone and copying it back. Sync runs on AWS with
+  end-to-end encryption as the design goal. Password-manager and
+  other sensitive clips never sync.
+- **One account, every device** — sign in with your ClipKeep
+  account on Mac, phone and web and your history stays in step.
+  Accounts are opt-in — the Mac app stays fully local and
+  account-free if you never turn sync on.
 - **Android first** — built for the phone its author actually
   carries; the iPhone version follows the same deliberate-capture
   design (share sheet, Shortcuts, the system paste control).
+  Both are built in React Native from one codebase.
 
 The full feasibility research is in
-[`MOBILE-RESEARCH.md`](MOBILE-RESEARCH.md).
+[`MOBILE-RESEARCH.md`](MOBILE-RESEARCH.md), and the design-C +
+React Native research in
+[`MOBILE-C-RESEARCH.md`](MOBILE-C-RESEARCH.md).
 
 ## What it deliberately does not do
 

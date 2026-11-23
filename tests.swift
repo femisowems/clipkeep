@@ -169,6 +169,43 @@ struct ClipKeepTests {
               !store.items.contains { $0.id == "b" })
         UserDefaults.standard.set(200, forKey: "historyLimit")
 
+        // Sync-ready model (v2.17.0) — origin stamps, updatedAt,
+        // tombstones, the v2 file envelope and v1 migration.
+        check("sync: inserted clips carry an origin stamp",
+              store.items.allSatisfy { $0.originPlatform == "mac" && $0.originDevice != nil })
+        check("sync: untouched clips have updatedAt == createdAt",
+              store.items.allSatisfy { $0.effectiveUpdatedAt == $0.createdAt })
+        check("sync: the trimmed clip left a tombstone",
+              store.tombstones.contains { $0.id == "b" })
+        check("sync: the tombstone is stamped with the deletion time",
+              (store.tombstones.first { $0.id == "b" }?.effectiveUpdatedAt ?? 0) > 1_000_000_000)
+        store.saveNow()
+        let reloadedSync = ClipStore()
+        checkEqual("sync: tombstones survive the v2 save/load round trip",
+                   reloadedSync.tombstones.map { $0.id }, store.tombstones.map { $0.id })
+
+        // v1 migration: a bare-array file (no envelope, none of
+        // the new fields) decodes as clips with no tombstones,
+        // and the missing updatedAt falls back to createdAt.
+        let legacyJSON = """
+        [{"id":"old1","kind":"text","text":"from v1","imageFile":null,"createdAt":42,"pinned":false}]
+        """
+        let legacy = ClipStore.decodeHistory(from: Data(legacyJSON.utf8))
+        checkEqual("sync: v1 file migrates its clips", legacy.clips.count, 1)
+        check("sync: v1 file has no tombstones", legacy.tombstones.isEmpty)
+        check("sync: migrated clip's updatedAt falls back to createdAt",
+              legacy.clips.first?.effectiveUpdatedAt == 42)
+
+        // Tombstone retention: 31 days old is purged, 1 day kept.
+        let purgeNow = 1_700_000_000.0
+        let staleStone = textItem("stale", "x").tombstoned(at: purgeNow - 31 * 24 * 60 * 60)
+        let freshStone = textItem("fresh", "y").tombstoned(at: purgeNow - 24 * 60 * 60)
+        checkEqual("sync: purge drops tombstones past 30 days",
+                   ClipStore.purgedTombstones([staleStone, freshStone], now: purgeNow).map { $0.id },
+                   ["fresh"])
+        check("sync: tombstoned() stamps the deletion time and keeps the id",
+              staleStone.effectiveUpdatedAt == purgeNow - 31 * 24 * 60 * 60 && staleStone.id == "stale")
+
         // Theme legibility (Nov 18, 2026) — every theme's
         // footer icon tint, accent and on-accent must stay
         // readable against the surfaces they sit on (WCAG

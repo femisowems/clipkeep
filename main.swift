@@ -34,6 +34,21 @@ struct ClipItem: Codable {
     var linkTitle: String? = nil     // fetched page title (link clips)
     var linkImageFile: String? = nil // fetched preview image filename (link clips)
     var linkChecked: Bool? = nil     // a preview fetch has been attempted
+    // Added in v2.17 (sync-ready) — optional so older files decode.
+    var updatedAt: Double? = nil      // last change; nil = createdAt
+    var originDevice: String? = nil   // device that created the clip
+    var originPlatform: String? = nil // "mac" for clips born here
+
+    var effectiveUpdatedAt: Double { updatedAt ?? createdAt }
+
+    // A tombstone copy: the same clip, stamped with its deletion
+    // time. Synced devices use tombstones to learn a clip is gone
+    // instead of resurrecting it from their own copy.
+    func tombstoned(at time: Double) -> ClipItem {
+        var copy = self
+        copy.updatedAt = time
+        return copy
+    }
 
     var preview: String {
         switch kind {
@@ -49,6 +64,15 @@ struct ClipItem: Codable {
     var isKeeper: Bool { pinned || board != nil }
 }
 
+// On-disk history format, v2 (v2.17.0): an envelope carrying a
+// schema version, the live clips and the tombstones. v1 files
+// were a bare [ClipItem] array — decodeHistory still reads them.
+struct HistoryFile: Codable {
+    var schemaVersion: Int
+    var clips: [ClipItem]
+    var tombstones: [ClipItem]
+}
+
 // MARK: - Store
 
 final class ClipStore {
@@ -56,6 +80,12 @@ final class ClipStore {
     let imagesDir: URL
     let fileURL: URL
     var items: [ClipItem] = []   // newest first
+    // Deleted clips, kept 30 days so sync can propagate the
+    // deletion to every device before the record is dropped.
+    var tombstones: [ClipItem] = []
+
+    static let currentSchemaVersion = 2
+    static let tombstoneRetention: Double = 30 * 24 * 60 * 60
 
     private let defaults = UserDefaults.standard
 
@@ -83,22 +113,50 @@ final class ClipStore {
         load()
     }
 
-    func load() {
-        guard let data = try? Data(contentsOf: fileURL) else { return }
-        if let decoded = try? JSONDecoder().decode([ClipItem].self, from: data) {
-            items = decoded
-            return
+    // Stable per-install device identity, stamped onto new clips
+    // so sync can tell which device a clip came from.
+    var deviceID: String {
+        if let id = defaults.string(forKey: "ClipKeepDeviceID") { return id }
+        let id = UUID().uuidString
+        defaults.set(id, forKey: "ClipKeepDeviceID")
+        return id
+    }
+
+    // Decode either on-disk format: the v2 envelope, or a v1
+    // bare [ClipItem] array (strict decode first, then the lossy
+    // per-entry fallback so one malformed clip can't silently
+    // blank the whole history — the strict decode fails
+    // atomically, every clip or none).
+    static func decodeHistory(from data: Data) -> (clips: [ClipItem], tombstones: [ClipItem]) {
+        let decoder = JSONDecoder()
+        if let file = try? decoder.decode(HistoryFile.self, from: data) {
+            return (file.clips, file.tombstones)
         }
-        // Lossy fallback: decode clip by clip so one malformed entry
-        // can't silently blank the whole history (the strict decode
-        // above fails atomically — every clip or none).
+        if let decoded = try? decoder.decode([ClipItem].self, from: data) {
+            return (decoded, [])
+        }
         if let raw = try? JSONSerialization.jsonObject(with: data) as? [Any] {
-            let decoder = JSONDecoder()
-            items = raw.compactMap { entry in
+            let clips = raw.compactMap { entry -> ClipItem? in
                 guard let entryData = try? JSONSerialization.data(withJSONObject: entry) else { return nil }
                 return try? decoder.decode(ClipItem.self, from: entryData)
             }
+            return (clips, [])
         }
+        return ([], [])
+    }
+
+    // Tombstones older than the retention window are dropped for
+    // good — by then every synced device has had its chance to
+    // learn of the deletion.
+    static func purgedTombstones(_ list: [ClipItem], now: Double) -> [ClipItem] {
+        list.filter { now - $0.effectiveUpdatedAt < tombstoneRetention }
+    }
+
+    func load() {
+        guard let data = try? Data(contentsOf: fileURL) else { return }
+        let decoded = Self.decodeHistory(from: data)
+        items = decoded.clips
+        tombstones = Self.purgedTombstones(decoded.tombstones, now: Date().timeIntervalSince1970)
     }
 
     // Saving used to encode the ENTIRE history and write it on
@@ -110,11 +168,11 @@ final class ClipStore {
     // synchronous flush, called on termination so a quit inside
     // the debounce window loses nothing.
     private let saveQueue = DispatchQueue(label: "io.starterdev.clipkeep.save")
-    private var pendingSnapshot: [ClipItem]?
+    private var pendingSnapshot: HistoryFile?
     private var flushScheduled = false
 
     func save() {
-        let snapshot = items
+        let snapshot = HistoryFile(schemaVersion: Self.currentSchemaVersion, clips: items, tombstones: tombstones)
         saveQueue.async { [weak self] in
             guard let self else { return }
             self.pendingSnapshot = snapshot
@@ -132,7 +190,8 @@ final class ClipStore {
     }
 
     func saveNow() {
-        if let data = try? JSONEncoder().encode(items) {
+        let file = HistoryFile(schemaVersion: Self.currentSchemaVersion, clips: items, tombstones: tombstones)
+        if let data = try? JSONEncoder().encode(file) {
             try? data.write(to: fileURL, options: .atomic)
         }
     }
@@ -149,6 +208,13 @@ final class ClipStore {
 
     // Insert at top, de-duplicating identical unpinned, unboarded clips.
     func insert(_ item: ClipItem) {
+        var item = item
+        // Sync-ready stamps: when the clip last changed, and the
+        // device it was born on. Captures enter here, so this is
+        // the one choke point every new clip passes through.
+        if item.updatedAt == nil { item.updatedAt = item.createdAt }
+        if item.originDevice == nil { item.originDevice = deviceID }
+        if item.originPlatform == nil { item.originPlatform = "mac" }
         for old in items where !old.isKeeper && sameContent(old, item) {
             remove(old)
         }
@@ -167,13 +233,33 @@ final class ClipStore {
         }
     }
 
+    // Record a deletion for sync before the clip leaves the live
+    // list. The tombstone carries the deletion time; the local
+    // image file still goes away now (each device keeps its own).
+    func recordTombstone(_ item: ClipItem, at time: Double = Date().timeIntervalSince1970) {
+        tombstones.removeAll { $0.id == item.id }
+        tombstones.insert(item.tombstoned(at: time), at: 0)
+    }
+
+    // Stamp a live clip as changed (pin, board, edit) so sync's
+    // last-writer-wins ordering sees the update.
+    func touch(id: String) {
+        if let idx = items.firstIndex(where: { $0.id == id }) {
+            items[idx].updatedAt = Date().timeIntervalSince1970
+        }
+    }
+
     func remove(_ item: ClipItem) {
+        recordTombstone(item)
         deleteImageFile(of: item)
         items.removeAll { $0.id == item.id }
     }
 
     func clearHistory() {
-        for old in items where !old.isKeeper { deleteImageFile(of: old) }
+        for old in items where !old.isKeeper {
+            recordTombstone(old)
+            deleteImageFile(of: old)
+        }
         items.removeAll { !$0.isKeeper }
         save()
     }
@@ -190,6 +276,7 @@ final class ClipStore {
                 seen += 1
                 kept.append(item)
             } else {
+                recordTombstone(item)
                 deleteImageFile(of: item)
             }
         }
@@ -2168,6 +2255,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         guard newText != store.items[idx].text else { previewWindow?.orderOut(nil); return }
         let wasLink = isLinkItem(store.items[idx])
         store.items[idx].text = newText
+        store.touch(id: id)
         if wasLink {
             // The URL may have changed — drop the fetched preview
             // and fetch the new page afresh.
@@ -2306,6 +2394,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     func togglePin(id: String) {
         guard let idx = store.items.firstIndex(where: { $0.id == id }) else { return }
         store.items[idx].pinned.toggle()
+        store.touch(id: id)
         store.items.sort { a, b in
             if a.pinned != b.pinned { return a.pinned && !b.pinned }
             return a.createdAt > b.createdAt
@@ -4078,6 +4167,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         guard let found = item(for: sender),
               let idx = store.items.firstIndex(where: { $0.id == found.id }) else { return }
         store.items[idx].board = sender.representedObject as? String
+        store.touch(id: found.id)
         store.save()
         refreshList()
     }
@@ -4101,6 +4191,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         }
         if let idx = store.items.firstIndex(where: { $0.id == found.id }) {
             store.items[idx].board = name
+            store.touch(id: found.id)
             store.save()
         }
         refreshList()
