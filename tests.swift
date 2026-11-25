@@ -226,7 +226,27 @@ struct ClipKeepTests {
             checkEqual("auth: authorize URL uses S256", param("code_challenge_method"), "S256")
             checkEqual("auth: authorize URL carries the redirect URI", param("redirect_uri"), "io.starterdev.clipkeep://auth")
             checkEqual("auth: authorize URL carries the state", param("state"), "state-123")
+            check("auth: authorize URL has no login hint by default", param("login_hint") == nil)
         }
+        // login_hint (v2.18.1): an address typed into the
+        // app's email field pre-fills the hosted UI. The hint
+        // is strictly percent-encoded in the raw URL — a raw
+        // "+" would read as a space to form-style parsers —
+        // and an absent or empty hint adds no parameter.
+        let hintURL = AuthConfig.authorizeURL(provider: .email, state: "state-123", challenge: "chal-456",
+                                              loginHint: "femi+test@example.com")
+        check("auth: hinted authorize URL is built", hintURL != nil)
+        if let hintURL {
+            let hintQuery = URLComponents(url: hintURL, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            checkEqual("auth: authorize URL carries the login hint",
+                       hintQuery.first { $0.name == "login_hint" }?.value, "femi+test@example.com")
+            check("auth: login hint is percent-encoded in the raw URL",
+                  hintURL.absoluteString.contains("login_hint=femi%2Btest%40example.com"))
+        }
+        let emptyHintURL = AuthConfig.authorizeURL(provider: .email, state: "state-123", challenge: "chal-456",
+                                                   loginHint: "")
+        check("auth: empty login hint adds no parameter",
+              !(emptyHintURL?.absoluteString.contains("login_hint") ?? true))
         // A hand-built unsigned JWT: header.payload.signature
         // with base64url segments throughout.
         func b64url(_ s: String) -> String { base64URLEncode(Data(s.utf8)) }

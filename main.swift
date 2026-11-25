@@ -447,6 +447,13 @@ class HoverButton: NSButton {
     var hoverTint: NSColor?
     var chromeCornerRadius: CGFloat = 7 { didSet { refreshChrome() } }
     var chromeBorderColor: NSColor? { didSet { refreshChrome() } }
+    // The border width rides in the chrome state (v2.18.1):
+    // the avatar's 2pt open-state ring used to be forced on
+    // the layer after refreshChrome ran, and every hover or
+    // press refresh quietly reset it to 1 — the ring visibly
+    // thinned under the pointer. Default 1 = the behaviour
+    // every other HoverButton already has.
+    var chromeBorderWidth: CGFloat = 1 { didSet { refreshChrome() } }
     private var hovering = false
     private var pressing = false
     private var hoverArea: NSTrackingArea?
@@ -480,7 +487,7 @@ class HoverButton: NSButton {
         layer?.backgroundColor = (pressing ? pressedBG : hovering ? hoverBG : normalBG).cgColor
         layer?.cornerRadius = chromeCornerRadius
         if let chromeBorderColor {
-            layer?.borderWidth = 1
+            layer?.borderWidth = chromeBorderWidth
             layer?.borderColor = chromeBorderColor.cgColor
         } else {
             layer?.borderWidth = 0
@@ -987,7 +994,6 @@ func trimmedText(_ text: String) -> String {
 // stays fully local until they are.
 
 enum AuthConfig {
-    static let region = "us-east-1"
     static let hostedDomain = "auth.starterdev.io"
     static let clientID = ""   // the Mac app client — filled in when the dev pool lands
     // Apple sign-in is DEFERRED (Femi, Nov 22, 2026): no
@@ -1006,14 +1012,14 @@ enum AuthConfig {
     static var authorizeEndpoint: String { "https://\(hostedDomain)/oauth2/authorize" }
     static var tokenEndpoint: String { "https://\(hostedDomain)/oauth2/token" }
     static var revokeEndpoint: String { "https://\(hostedDomain)/oauth2/revoke" }
-    static var logoutEndpoint: String { "https://\(hostedDomain)/logout" }
 
     // The authorize URL for one provider. Google and Apple
     // deep-link their hosted-UI identity provider; email
     // opens the plain hosted UI, whose passwordless email
     // one-time code is a native Cognito (Essentials) first
     // factor — no custom challenge Lambdas.
-    static func authorizeURL(provider: AuthProvider, state: String, challenge: String) -> URL? {
+    static func authorizeURL(provider: AuthProvider, state: String, challenge: String,
+                             loginHint: String? = nil) -> URL? {
         var components = URLComponents(string: authorizeEndpoint)
         var query: [URLQueryItem] = [
             URLQueryItem(name: "response_type", value: "code"),
@@ -1028,7 +1034,20 @@ enum AuthConfig {
             query.append(URLQueryItem(name: "identity_provider", value: idp))
         }
         components?.queryItems = query
-        return components?.url
+        guard var url = components?.url else { return nil }
+        // login_hint (v2.18.1): the address typed into the
+        // app's own email field rides along so the hosted UI
+        // pre-fills it instead of asking a second time. It is
+        // appended with formEscape rather than as a query
+        // item: URLComponents leaves "+" (and "@") raw in
+        // query values, and a raw + reads as a space to
+        // form-style query parsers — exactly the character
+        // email aliases use.
+        if let loginHint, !loginHint.isEmpty,
+           let hinted = URL(string: url.absoluteString + "&login_hint=\(formEscape(loginHint))") {
+            url = hinted
+        }
+        return url
     }
 }
 
@@ -1298,7 +1317,7 @@ final class AuthManager: NSObject, ASWebAuthenticationPresentationContextProvidi
         }
     }
 
-    func signIn(provider: AuthProvider) {
+    func signIn(provider: AuthProvider, loginHint: String? = nil) {
         guard AuthConfig.isConfigured else {
             onNotConfigured?()
             return
@@ -1315,7 +1334,8 @@ final class AuthManager: NSObject, ASWebAuthenticationPresentationContextProvidi
         pendingVerifier = verifier
         pendingState = nonce
         guard let url = AuthConfig.authorizeURL(provider: provider, state: nonce,
-                                                challenge: pkceChallenge(for: verifier)) else {
+                                                challenge: pkceChallenge(for: verifier),
+                                                loginHint: loginHint) else {
             state = .error("Couldn't build the sign-in address.")
             return
         }
@@ -1575,6 +1595,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     var heroSyncNowButton: NSButton!
     var syncIdentityLabel: NSTextField!
     var syncEmailLabel: NSTextField!
+    var syncEmailField: NSTextField!
+    var syncDeviceDot: NSView!
+    var syncEscChip: NSView!
+    var syncEscLabel: NSTextField!
     var settingsAccountSignedOutView: NSStackView?
     var settingsAccountSignedInView: NSStackView?
     var settingsAccountAvatarLabel: NSTextField?
@@ -1582,6 +1606,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     var settingsAccountEmailLabel: NSTextField?
     var settingsSyncCheckbox: NSButton?
     var settingsSyncStatusLabel: NSTextField?
+    var settingsEmailField: NSTextField?
+
+    // Panel-open bookkeeping (v2.18.1): the first open after
+    // a launch still needs togglePanel's second rebuild (the
+    // v2.15.6 first-frame fix); later opens skip it. The
+    // search debounce is the pending per-keystroke rebuild,
+    // if any (delay findings F1/F2).
+    var hasShownPanelOnce = false
+    var searchDebounce: DispatchWorkItem?
 
     var timer: Timer?
     var lastChangeCount = 0
@@ -3302,6 +3335,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         overflowButton.pressedBG = NSColor(white: 0, alpha: 0.10)
         overflowButton.chromeCornerRadius = 16
         overflowButton.chromeBorderColor = NSColor(white: 0, alpha: 0.10)
+        overflowButton.toolTip = "More actions"
+        overflowButton.setAccessibilityLabel("More actions")
         overflowButton.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(overflowButton)
 
@@ -3319,20 +3354,34 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         avatarButton.action = #selector(avatarClicked)
         avatarButton.chromeCornerRadius = 16
         avatarButton.baseTint = .white
+        // Fire on mouse-down (v2.18.1): the toggle is a tab
+        // switch, and waiting for mouse-up read as lag (delay
+        // finding F3). HoverButton's press chrome still runs;
+        // only the action's timing moves.
+        _ = avatarButton.sendAction(on: .leftMouseDown)
+        avatarButton.toolTip = "Account & Sync"
+        avatarButton.setAccessibilityLabel("Account and sync")
         avatarButton.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(avatarButton)
 
+        // The dot is a 10pt badge centred on the button's
+        // corner arc (v2.18.1): at 10pt with its edge flush to
+        // the button's corner, its centre sits ~5pt in — the
+        // arc of the 32pt circle passes ~4.7pt in — so the
+        // badge straddles the curve instead of denting it
+        // (the "skewered" screenshot). Its ring colour is set
+        // in refreshAvatarButton, keyed to the backdrop.
         avatarDot = PassthroughView()
         avatarDot.wantsLayer = true
-        avatarDot.layer?.cornerRadius = 4
-        avatarDot.layer?.borderWidth = 1.5
+        avatarDot.layer?.cornerRadius = 5
+        avatarDot.layer?.borderWidth = 2
         avatarDot.translatesAutoresizingMaskIntoConstraints = false
         avatarButton.addSubview(avatarDot)
         NSLayoutConstraint.activate([
-            avatarDot.trailingAnchor.constraint(equalTo: avatarButton.trailingAnchor, constant: -1),
-            avatarDot.bottomAnchor.constraint(equalTo: avatarButton.bottomAnchor, constant: -1),
-            avatarDot.widthAnchor.constraint(equalToConstant: 8),
-            avatarDot.heightAnchor.constraint(equalToConstant: 8)
+            avatarDot.trailingAnchor.constraint(equalTo: avatarButton.trailingAnchor),
+            avatarDot.bottomAnchor.constraint(equalTo: avatarButton.bottomAnchor),
+            avatarDot.widthAnchor.constraint(equalToConstant: 10),
+            avatarDot.heightAnchor.constraint(equalToConstant: 10)
         ])
 
         // Update strip (v2.6.0): pinned under the search row.
@@ -3367,6 +3416,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         updateDismissButton.bezelStyle = .inline
         updateDismissButton.isBordered = false
         updateDismissButton.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        updateDismissButton.toolTip = "Dismiss"
+        updateDismissButton.setAccessibilityLabel("Dismiss")
         updateDismissButton.translatesAutoresizingMaskIntoConstraints = false
         updateStrip.addSubview(updateDismissButton)
 
@@ -3632,7 +3683,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     }
 
     func controlTextDidChange(_ obj: Notification) {
-        refreshList()
+        // Debounced (v2.18.1): refreshList is a full feed
+        // rebuild, so typing rebuilt every card per
+        // keystroke (delay finding F2). A burst of edits now
+        // settles into one rebuild a beat after the last
+        // keystroke; the rebuild reads the field's text when
+        // it runs, so no keystroke is lost.
+        searchDebounce?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.refreshList() }
+        searchDebounce = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
     }
 
     @objc func filterChanged() {
@@ -3703,6 +3763,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             card.layer?.borderColor = theme.cardBorder.cgColor
         }
         refreshAvatarButton()
+        refreshSyncView()
         refreshUpdateStrip()
         refreshList()
     }
@@ -3767,19 +3828,24 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     // single-file build doesn't carry yet.
     private func socialButton(title: String, background: NSColor, foreground: NSColor,
                               bordered: Bool, action: Selector) -> NSButton {
-        let button = NSButton()
+        let button = HoverButton(frame: .zero)
         button.attributedTitle = NSAttributedString(string: title, attributes: [
             .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
             .foregroundColor: foreground
         ])
-        button.isBordered = false
-        button.bezelStyle = .inline
-        button.wantsLayer = true
-        button.layer?.backgroundColor = background.cgColor
-        button.layer?.cornerRadius = 8
+        // Hover/pressed washes (v2.18.1): HoverButton paints
+        // its layer from these, so the primary sign-in
+        // controls answer the pointer instead of feeling dead
+        // for a beat while the sheet or alert gathers itself.
+        // The washes shift the rest colour toward the
+        // foreground — that darkens the white Google button
+        // and lightens the black Apple one. Identical at rest.
+        button.normalBG = background
+        button.hoverBG = background.blended(withFraction: 0.08, of: foreground) ?? background
+        button.pressedBG = background.blended(withFraction: 0.16, of: foreground) ?? background
+        button.chromeCornerRadius = 8
         if bordered {
-            button.layer?.borderWidth = 1
-            button.layer?.borderColor = NSColor(white: 0, alpha: 0.14).cgColor
+            button.chromeBorderColor = NSColor(white: 0, alpha: 0.14)
         }
         button.target = self
         button.action = action
@@ -3814,24 +3880,28 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         let eyebrow = NSTextField(labelWithString: "SYNC")
         eyebrow.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
         eyebrow.textColor = .secondaryLabelColor
+        // The esc keycap wears the empty state's hint-chip
+        // styling (v2.18.1): same 6pt radius, 24pt height and
+        // 11.5pt label; its colours are painted in
+        // refreshSyncView, where the theme is at hand, the
+        // way refreshList restyles the hint chips.
         let escLabel = NSTextField(labelWithString: "esc")
-        escLabel.font = NSFont.systemFont(ofSize: 11, weight: .medium)
-        escLabel.textColor = .secondaryLabelColor
+        escLabel.font = NSFont.systemFont(ofSize: 11.5, weight: .medium)
         escLabel.alignment = .center
         escLabel.translatesAutoresizingMaskIntoConstraints = false
+        syncEscLabel = escLabel
         let escChip = NSView()
         escChip.wantsLayer = true
-        escChip.layer?.cornerRadius = 5
-        escChip.layer?.backgroundColor = NSColor(white: 0, alpha: 0.06).cgColor
+        escChip.layer?.cornerRadius = 6
         escChip.layer?.borderWidth = 1
-        escChip.layer?.borderColor = NSColor(white: 0, alpha: 0.10).cgColor
         escChip.translatesAutoresizingMaskIntoConstraints = false
         escChip.addSubview(escLabel)
+        syncEscChip = escChip
         NSLayoutConstraint.activate([
             escLabel.centerXAnchor.constraint(equalTo: escChip.centerXAnchor),
             escLabel.centerYAnchor.constraint(equalTo: escChip.centerYAnchor),
             escChip.widthAnchor.constraint(equalToConstant: 32),
-            escChip.heightAnchor.constraint(equalToConstant: 20)
+            escChip.heightAnchor.constraint(equalToConstant: 24)
         ])
         let spacerA = NSView()
         let spacerB = NSView()
@@ -3880,6 +3950,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         hero.addSubview(heroToggle)
         heroSyncNowButton = NSButton(title: "Sync Now", target: self, action: #selector(syncNowClicked))
         heroSyncNowButton.bezelStyle = .rounded
+        // The button is disabled until the engine exists;
+        // the reason gets a tooltip (v2.18.1), not just a
+        // code comment.
+        heroSyncNowButton.toolTip = "Sync launches with ClipKeep Cloud"
         heroSyncNowButton.translatesAutoresizingMaskIntoConstraints = false
         hero.addSubview(heroSyncNowButton)
         NSLayoutConstraint.activate([
@@ -3915,11 +3989,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         accountStack.addArrangedSubview(syncIdentityLabel)
         syncEmailLabel = syncBodyLabel("", size: 11.5, color: .secondaryLabelColor)
         accountStack.addArrangedSubview(syncEmailLabel)
-        let connectGoogle = NSButton(title: "Connect Google", target: self, action: #selector(connectGoogleClicked(_:)))
+        let connectGoogle = NSButton(title: "Connect Google", target: self, action: #selector(signInGoogleClicked(_:)))
         connectGoogle.bezelStyle = .rounded
         connectGoogle.controlSize = .small
         accountStack.addArrangedSubview(connectGoogle)
-        let connectApple = NSButton(title: "Connect Apple", target: self, action: #selector(connectAppleClicked(_:)))
+        let connectApple = NSButton(title: "Connect Apple", target: self, action: #selector(signInAppleClicked(_:)))
         connectApple.bezelStyle = .rounded
         connectApple.controlSize = .small
         accountStack.addArrangedSubview(connectApple)
@@ -3947,9 +4021,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         let deviceDot = NSView()
         deviceDot.wantsLayer = true
         deviceDot.layer?.cornerRadius = 4
-        deviceDot.layer?.backgroundColor = NSColor.systemGreen.cgColor
+        // Colour is state-driven in refreshSyncView
+        // (v2.18.1) — it used to be painted green here and
+        // stayed green with sync off or in an error state.
+        deviceDot.layer?.backgroundColor = NSColor(white: 0.66, alpha: 1).cgColor
         deviceDot.widthAnchor.constraint(equalToConstant: 8).isActive = true
         deviceDot.heightAnchor.constraint(equalToConstant: 8).isActive = true
+        syncDeviceDot = deviceDot
         let deviceRow = NSStackView(views: [deviceDot,
                                             syncBodyLabel("This Mac", size: 12.5, weight: .medium),
                                             syncBodyLabel("this device", size: 11, color: .secondaryLabelColor)])
@@ -3981,17 +4059,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         privacyStack.addArrangedSubview(promiseRow)
         privacyStack.addArrangedSubview(syncWrappingLabel("Clips marked sensitive and copies from password managers never leave this device."))
 
+        // Stacks pin all four sides (v2.18.1), the invite
+        // card's pattern: top-only pinning left the content
+        // flush on each card's bottom edge, and with the row
+        // top-aligned the three cards ended at three heights.
         for (card, stack) in [(accountCard, accountStack), (devicesCard, devicesStack), (privacyCard, privacyStack)] {
             NSLayoutConstraint.activate([
                 stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: Self.spaceCardPad),
                 stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -Self.spaceCardPad),
-                stack.topAnchor.constraint(equalTo: card.topAnchor, constant: Self.spaceCardPad)
+                stack.topAnchor.constraint(equalTo: card.topAnchor, constant: Self.spaceCardPad),
+                stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -Self.spaceCardPad)
             ])
         }
 
         let cardsRow = NSStackView(views: [accountCard, devicesCard, privacyCard])
         cardsRow.orientation = .horizontal
-        cardsRow.alignment = .top
+        cardsRow.alignment = .height
         cardsRow.distribution = .fillEqually
         cardsRow.spacing = Self.spaceCardGap
         cardsRow.translatesAutoresizingMaskIntoConstraints = false
@@ -4046,6 +4129,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         emailField.placeholderString = "Email"
         emailField.font = NSFont.systemFont(ofSize: 12.5)
         emailField.widthAnchor.constraint(equalToConstant: 240).isActive = true
+        syncEmailField = emailField
+        // Return in the field is the button (v2.18.1): the
+        // field's action fires on end editing and lands on
+        // the same handler, which reads the field's value as
+        // the login hint.
+        emailField.target = self
+        emailField.action = #selector(signInEmailClicked(_:))
         let emailButton = NSButton(title: "Email me a code", target: self, action: #selector(signInEmailClicked(_:)))
         emailButton.bezelStyle = .rounded
         let emailRow = NSStackView(views: [emailField, emailButton])
@@ -4106,6 +4196,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             inviteCard.centerYAnchor.constraint(equalTo: signedOut.centerYAnchor),
             inviteCard.widthAnchor.constraint(equalToConstant: 460)
         ])
+
+        // Warm render (v2.18.1): lay the view out now and let
+        // its layer rasterize, so the first avatar click
+        // doesn't pay the first composite of this whole
+        // surface on the panel's full-width frost (delay
+        // finding F3).
+        container.wantsLayer = true
+        container.layer?.shouldRasterize = true
+        container.layer?.rasterizationScale = NSScreen.main?.backingScaleFactor ?? 2
+        container.layoutSubtreeIfNeeded()
     }
 
     func refreshSyncView() {
@@ -4146,6 +4246,30 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         // an enabled button that does nothing would be a lie.
         heroSyncNowButton.isEnabled = false
 
+        // The Devices card dot mirrors the avatar dot's
+        // state (v2.18.1) — painted once at build, it read
+        // "happily syncing" even with sync off or in error.
+        if case .error = auth.state {
+            syncDeviceDot?.layer?.backgroundColor = NSColor.systemOrange.cgColor
+        } else if identity != nil && syncEnabled {
+            syncDeviceDot?.layer?.backgroundColor = NSColor.systemGreen.cgColor
+        } else {
+            syncDeviceDot?.layer?.backgroundColor = NSColor(white: 0.66, alpha: 1).cgColor
+        }
+
+        // The esc keycap follows the theme (v2.18.1) with
+        // the same values refreshList paints on the empty
+        // state's hint chips.
+        syncEscChip?.layer?.backgroundColor = currentTheme.dark
+            ? NSColor(white: 1, alpha: 0.10).cgColor
+            : NSColor(white: 0, alpha: 0.06).cgColor
+        syncEscChip?.layer?.borderColor = currentTheme.dark
+            ? NSColor(white: 1, alpha: 0.14).cgColor
+            : NSColor(white: 0, alpha: 0.10).cgColor
+        syncEscLabel?.textColor = currentTheme.dark
+            ? NSColor(white: 1, alpha: 0.85)
+            : NSColor(white: 0, alpha: 0.75)
+
         syncIdentityLabel.stringValue = accountDisplayName(identity)
         syncEmailLabel.stringValue = identity?.email ?? ""
     }
@@ -4163,27 +4287,46 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             ])
             avatarButton.image = nil
         } else {
-            avatarButton.normalBG = NSColor(white: 0.62, alpha: 1)
-            avatarButton.hoverBG = NSColor(white: 0.55, alpha: 1)
-            avatarButton.pressedBG = NSColor(white: 0.48, alpha: 1)
+            // Signed-out fill (v2.18.1): a warm wash keyed to
+            // the theme instead of flat grey — the button is
+            // the way into the Sync view, and flat grey read
+            // as a disabled control.
+            let wash = currentTheme.dark
+                ? NSColor(red: 0.42, green: 0.38, blue: 0.34, alpha: 1)
+                : NSColor(red: 0.71, green: 0.65, blue: 0.58, alpha: 1)
+            avatarButton.normalBG = wash
+            avatarButton.hoverBG = wash.blended(withFraction: 0.10, of: .black) ?? wash
+            avatarButton.pressedBG = wash.blended(withFraction: 0.18, of: .black) ?? wash
             avatarButton.attributedTitle = NSAttributedString(string: "")
             avatarButton.imagePosition = .imageOnly
             avatarButton.image = NSImage(systemSymbolName: "person.fill", accessibilityDescription: "Account")?
-                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold))
+                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 15, weight: .semibold))
         }
         avatarButton.chromeBorderColor = syncOpen ? NSColor(red: 0, green: 0.478, blue: 1, alpha: 1) : nil
+        avatarButton.chromeBorderWidth = syncOpen ? 2 : 1
         avatarButton.refreshChrome()
-        if syncOpen { avatarButton.layer?.borderWidth = 2 }
-        let dot: NSColor
+        // Status badge (v2.18.1): ringed with the panel's own
+        // backdrop — the theme tint over the frost, solid
+        // under Reduce Transparency, mirroring applyTheme —
+        // not cardBG, which painted a pale crescent against
+        // the search row (the "skewered" screenshot). Signed
+        // out, the badge goes hollow: backdrop fill, grey
+        // ring — a deliberate "no sync" read, not a faint dot
+        // lost on the button's fill.
+        let solid = UserDefaults.standard.bool(forKey: "ClipKeepReduceTransparency")
+        let backdrop = solid ? currentTheme.tint.withAlphaComponent(1) : currentTheme.tint
         if case .error = auth.state {
-            dot = .systemOrange
+            avatarDot.layer?.backgroundColor = NSColor.systemOrange.cgColor
+            avatarDot.layer?.borderColor = backdrop.cgColor
         } else if auth.session != nil && syncEnabled {
-            dot = .systemGreen
+            avatarDot.layer?.backgroundColor = NSColor.systemGreen.cgColor
+            avatarDot.layer?.borderColor = backdrop.cgColor
         } else {
-            dot = NSColor(white: 0.66, alpha: 1)
+            avatarDot.layer?.backgroundColor = backdrop.cgColor
+            avatarDot.layer?.borderColor = (currentTheme.dark
+                ? NSColor(white: 0.85, alpha: 1)
+                : NSColor(white: 0.45, alpha: 1)).cgColor
         }
-        avatarDot.layer?.backgroundColor = dot.cgColor
-        avatarDot.layer?.borderColor = currentTheme.cardBG.cgColor
     }
 
     func setSyncView(open: Bool) {
@@ -4264,19 +4407,26 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         auth.signIn(provider: .google)
     }
 
-    @objc func signInEmailClicked(_ sender: NSButton) {
+    // The typed address rides along as a login hint
+    // (v2.18.1) — the hosted UI pre-fills it instead of
+    // asking again. The sender is the surface's "Email me a
+    // code" button or its email field itself: Return in the
+    // field fires the same action. (The Connect rows point
+    // at the sign-in handlers directly since v2.18.1 — the
+    // connect-prefixed duplicates were byte-identical.)
+    @objc func signInEmailClicked(_ sender: NSControl) {
         auth.anchorWindow = sender.window
-        auth.signIn(provider: .email)
+        auth.signIn(provider: .email, loginHint: emailHint(from: syncEmailField))
     }
 
-    @objc func connectGoogleClicked(_ sender: NSButton) {
+    @objc func settingsEmailClicked(_ sender: NSControl) {
         auth.anchorWindow = sender.window
-        auth.signIn(provider: .google)
+        auth.signIn(provider: .email, loginHint: emailHint(from: settingsEmailField))
     }
 
-    @objc func connectAppleClicked(_ sender: NSButton) {
-        auth.anchorWindow = sender.window
-        auth.signIn(provider: .apple)
+    private func emailHint(from field: NSTextField?) -> String? {
+        let trimmed = field?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     @objc func signOutClicked() {
@@ -5963,8 +6113,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         acctOut.addArrangedSubview(acctGoogle)
         let acctEmailField = NSTextField()
         acctEmailField.placeholderString = "Email"
+        acctEmailField.font = NSFont.systemFont(ofSize: 12.5)
         acctEmailField.widthAnchor.constraint(equalToConstant: 220).isActive = true
-        let acctEmailButton = NSButton(title: "Email me a code", target: self, action: #selector(signInEmailClicked(_:)))
+        settingsEmailField = acctEmailField
+        // Return in the field is the button (v2.18.1), same
+        // as the panel's field.
+        acctEmailField.target = self
+        acctEmailField.action = #selector(settingsEmailClicked(_:))
+        let acctEmailButton = NSButton(title: "Email me a code", target: self, action: #selector(settingsEmailClicked(_:)))
         acctEmailButton.bezelStyle = .rounded
         let acctEmailRow = NSStackView(views: [acctEmailField, acctEmailButton])
         acctEmailRow.orientation = .horizontal
@@ -6025,9 +6181,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         acctStatusRow.spacing = 8
         acctIn.addArrangedSubview(acctStatusRow)
         acctIn.addArrangedSubview(NSTextField(labelWithString: "Devices: This Mac (this device)"))
-        let acctConnectGoogle = NSButton(title: "Connect Google", target: self, action: #selector(connectGoogleClicked(_:)))
+        let acctConnectGoogle = NSButton(title: "Connect Google", target: self, action: #selector(signInGoogleClicked(_:)))
         acctConnectGoogle.bezelStyle = .rounded
-        let acctConnectApple = NSButton(title: "Connect Apple", target: self, action: #selector(connectAppleClicked(_:)))
+        let acctConnectApple = NSButton(title: "Connect Apple", target: self, action: #selector(signInAppleClicked(_:)))
         acctConnectApple.bezelStyle = .rounded
         let acctConnectRow = NSStackView(views: [acctConnectGoogle, acctConnectApple])
         acctConnectRow.orientation = .horizontal
@@ -6035,12 +6191,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         acctIn.addArrangedSubview(acctConnectRow)
         let acctSignOut = NSButton(title: "Sign Out", target: self, action: #selector(signOutClicked))
         acctSignOut.bezelStyle = .rounded
+        acctIn.addArrangedSubview(acctSignOut)
         let acctDelete = NSButton(title: "Delete Account…", target: self, action: #selector(deleteAccountClicked))
-        acctDelete.bezelStyle = .rounded
-        let acctActions = NSStackView(views: [acctSignOut, acctDelete])
-        acctActions.orientation = .horizontal
-        acctActions.spacing = 8
-        acctIn.addArrangedSubview(acctActions)
+        // Delete wears the panel's treatment (v2.18.1):
+        // borderless red text on its own row, not a rounded
+        // button inviting a stray click beside Sign Out.
+        acctDelete.bezelStyle = .inline
+        acctDelete.isBordered = false
+        acctDelete.contentTintColor = .systemRed
+        acctDelete.font = NSFont.systemFont(ofSize: 12)
+        acctIn.addArrangedSubview(acctDelete)
+        acctIn.setCustomSpacing(16, after: acctSignOut)
         acct.addArrangedSubview(acctIn)
         settingsAccountSignedInView = acctIn
 
@@ -6245,10 +6406,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                 // ~62pt down and the row stretched, while every
                 // later rebuild (filter toggles) rendered fine.
                 // Rebuilding once the panel is actually displayed
-                // reproduces that known-good state; on later opens
-                // it's an identical, invisible rebuild (the launch
-                // intro's overlay covers the swap on first open).
-                self.refreshList()
+                // reproduces that known-good state.
+                // v2.18.1: only the first open needs it — the
+                // frames it measures against exist from then on,
+                // and on later opens the identical second rebuild
+                // was pure delay (finding F1). If first-open
+                // cards ever render mis-measured again, this gate
+                // is the first suspect.
+                if !self.hasShownPanelOnce {
+                    self.hasShownPanelOnce = true
+                    self.refreshList()
+                }
             }
             NSApp.activate(ignoringOtherApps: true)
             // v2.16.4: the panel opens with the FEED holding
