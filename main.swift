@@ -530,6 +530,12 @@ class HoverButton: NSButton {
     // thinned under the pointer. Default 1 = the behaviour
     // every other HoverButton already has.
     var chromeBorderWidth: CGFloat = 1 { didSet { refreshChrome() } }
+    // Read-only chrome state + a refresh hook (v2.19.2): the
+    // avatar paints its face on its own disc subview, in step
+    // with the button's hover/press refreshes.
+    var isHoveringNow: Bool { hovering }
+    var isPressingNow: Bool { pressing }
+    var onChromeRefresh: (() -> Void)?
     private var hovering = false
     private var pressing = false
     private var hoverArea: NSTrackingArea?
@@ -573,7 +579,18 @@ class HoverButton: NSButton {
         } else if let baseTint {
             contentTintColor = baseTint
         }
+        onChromeRefresh?()
     }
+}
+
+// Hit-test-transparent face subviews (v2.19.2): the avatar's
+// disc, glyph and initial ride on top of the button but must
+// never intercept a click — every press belongs to the button.
+final class PassthroughImageView: NSImageView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+final class PassthroughLabel: NSTextField {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 // Stack view that never intercepts clicks — used inside pill
@@ -1647,6 +1664,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         set { UserDefaults.standard.set(newValue, forKey: "ClipKeepSyncEnabled") }
     }
     var avatarButton: HoverButton!
+    var avatarDisc: PassthroughView!
+    var avatarGlyph: PassthroughImageView!
+    var avatarInitial: PassthroughLabel!
     var avatarDot: PassthroughView!
     var syncView: NSView!
     var syncSignedInView: NSView!
@@ -3427,7 +3447,51 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         avatarButton.toolTip = "Account & Sync"
         avatarButton.setAccessibilityLabel("Account and sync")
         avatarButton.translatesAutoresizingMaskIntoConstraints = false
+        // The face lives on its own disc (v2.19.2): the
+        // button's layer painted the signed-in initial as a
+        // true circle but the signed-out wash as a wider
+        // rounded rect — same button, two shapes (Femi's
+        // screenshots, Nov 25). The disc is a separate view
+        // pinned to a fixed 32×32 centre, so both states get
+        // literally the same circle; the button keeps the
+        // click, the open-state ring and the hover hook, with
+        // its own background clear.
+        avatarButton.normalBG = .clear
+        avatarButton.hoverBG = .clear
+        avatarButton.pressedBG = .clear
+        avatarButton.onChromeRefresh = { [weak self] in self?.paintAvatarFace() }
         content.addSubview(avatarButton)
+
+        avatarDisc = PassthroughView()
+        avatarDisc.wantsLayer = true
+        avatarDisc.layer?.cornerRadius = 16
+        avatarDisc.translatesAutoresizingMaskIntoConstraints = false
+        avatarButton.addSubview(avatarDisc)
+
+        avatarGlyph = PassthroughImageView()
+        avatarGlyph.image = NSImage(systemSymbolName: "person.fill", accessibilityDescription: "Account")?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 15, weight: .semibold))
+        avatarGlyph.contentTintColor = .white
+        avatarGlyph.translatesAutoresizingMaskIntoConstraints = false
+        avatarButton.addSubview(avatarGlyph)
+
+        avatarInitial = PassthroughLabel(labelWithString: "")
+        avatarInitial.font = NSFont.systemFont(ofSize: 13, weight: .bold)
+        avatarInitial.textColor = .white
+        avatarInitial.alignment = .center
+        avatarInitial.translatesAutoresizingMaskIntoConstraints = false
+        avatarButton.addSubview(avatarInitial)
+
+        NSLayoutConstraint.activate([
+            avatarDisc.centerXAnchor.constraint(equalTo: avatarButton.centerXAnchor),
+            avatarDisc.centerYAnchor.constraint(equalTo: avatarButton.centerYAnchor),
+            avatarDisc.widthAnchor.constraint(equalToConstant: 32),
+            avatarDisc.heightAnchor.constraint(equalToConstant: 32),
+            avatarGlyph.centerXAnchor.constraint(equalTo: avatarButton.centerXAnchor),
+            avatarGlyph.centerYAnchor.constraint(equalTo: avatarButton.centerYAnchor),
+            avatarInitial.centerXAnchor.constraint(equalTo: avatarButton.centerXAnchor),
+            avatarInitial.centerYAnchor.constraint(equalTo: avatarButton.centerYAnchor)
+        ])
 
         // The dot is a 10pt badge centred on the button's
         // corner arc (v2.18.1): at 10pt with its edge flush to
@@ -4338,34 +4402,41 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         syncEmailLabel.stringValue = identity?.email ?? ""
     }
 
-    func refreshAvatarButton() {
-        guard avatarButton != nil else { return }
-        let brandOrange = NSColor(red: 0.894, green: 0.341, blue: 0.180, alpha: 1)   // #e4572e
+    // The avatar's face (v2.19.2): one disc, both states —
+    // see the construction note. Painted here and again from
+    // the button's chrome hook whenever hover/press changes,
+    // so the disc answers the pointer exactly as the button's
+    // own painted chrome used to.
+    func paintAvatarFace() {
+        guard avatarDisc != nil, avatarButton != nil else { return }
+        let hovering = avatarButton.isHoveringNow
+        let pressing = avatarButton.isPressingNow
         if let identity = auth.session?.identity {
-            avatarButton.normalBG = brandOrange
-            avatarButton.hoverBG = NSColor(red: 0.855, green: 0.310, blue: 0.160, alpha: 1)
-            avatarButton.pressedBG = NSColor(red: 0.780, green: 0.275, blue: 0.140, alpha: 1)
-            avatarButton.attributedTitle = NSAttributedString(string: accountInitial(for: identity), attributes: [
-                .font: NSFont.systemFont(ofSize: 13, weight: .bold),
-                .foregroundColor: NSColor.white
-            ])
-            avatarButton.image = nil
+            let bg = pressing ? NSColor(red: 0.780, green: 0.275, blue: 0.140, alpha: 1)
+                : hovering ? NSColor(red: 0.855, green: 0.310, blue: 0.160, alpha: 1)
+                : NSColor(red: 0.894, green: 0.341, blue: 0.180, alpha: 1)   // #e4572e
+            avatarDisc.layer?.backgroundColor = bg.cgColor
+            avatarInitial.stringValue = accountInitial(for: identity)
+            avatarInitial.isHidden = false
+            avatarGlyph.isHidden = true
         } else {
-            // Signed-out fill (v2.18.1): a warm wash keyed to
-            // the theme instead of flat grey — the button is
-            // the way into the Sync view, and flat grey read
-            // as a disabled control.
+            // Signed-out wash (v2.18.1): warm, theme-keyed —
+            // flat grey read as a disabled control.
             let wash = currentTheme.dark
                 ? NSColor(red: 0.42, green: 0.38, blue: 0.34, alpha: 1)
                 : NSColor(red: 0.71, green: 0.65, blue: 0.58, alpha: 1)
-            avatarButton.normalBG = wash
-            avatarButton.hoverBG = wash.blended(withFraction: 0.10, of: .black) ?? wash
-            avatarButton.pressedBG = wash.blended(withFraction: 0.18, of: .black) ?? wash
-            avatarButton.attributedTitle = NSAttributedString(string: "")
-            avatarButton.imagePosition = .imageOnly
-            avatarButton.image = NSImage(systemSymbolName: "person.fill", accessibilityDescription: "Account")?
-                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 15, weight: .semibold))
+            let bg = pressing ? (wash.blended(withFraction: 0.18, of: .black) ?? wash)
+                : hovering ? (wash.blended(withFraction: 0.10, of: .black) ?? wash)
+                : wash
+            avatarDisc.layer?.backgroundColor = bg.cgColor
+            avatarInitial.isHidden = true
+            avatarGlyph.isHidden = false
         }
+    }
+
+    func refreshAvatarButton() {
+        guard avatarButton != nil else { return }
+        paintAvatarFace()
         avatarButton.chromeBorderColor = syncOpen ? NSColor(red: 0, green: 0.478, blue: 1, alpha: 1) : nil
         avatarButton.chromeBorderWidth = syncOpen ? 2 : 1
         avatarButton.refreshChrome()
