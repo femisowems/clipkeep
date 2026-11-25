@@ -1056,31 +1056,26 @@ func trimmedText(_ text: String) -> String {
 // client — the Mac included — signs in through Cognito's
 // OAuth web flow (authorization code + PKCE) in
 // ASWebAuthenticationSession against the hosted UI on
-// auth.starterdev.io: user pools cannot consume a native
+// auth.starterdev.com: user pools cannot consume a native
 // Apple/Google credential, so there is deliberately no
 // native provider SDK here (RESEARCH-NOTES §2). Tokens live
 // in ONE Keychain item so a rotated refresh token can never
 // be half-written.
 //
-// AuthConfig.clientID is EMPTY until the dev user pool
-// exists. While it is empty the sign-in UI stays fully
-// visible (per the approved mocks) and signIn() reports
-// "not configured" instead of starting a flow — the app
-// ships honest: accounts are not live yet, and ClipKeep
-// stays fully local until they are.
+// AuthConfig.clientID carries the deployed pool's Mac
+// app client (v2.19.0), so sign-in is live. Should it
+// ever be empty, the sign-in UI stays fully visible
+// (per the approved mocks) and signIn() reports "not
+// configured" instead of starting a flow — the app
+// ships honest, and ClipKeep stays fully local for
+// anyone who never signs in.
 
 enum AuthConfig {
-    static let hostedDomain = "auth.starterdev.io"
-    static let clientID = ""   // the Mac app client — filled in when the dev pool lands
-    // Apple sign-in is DEFERRED (Femi, Nov 22, 2026): no
-    // Apple Developer Program enrolment yet, so the pool
-    // will carry Google + email OTP only — no Apple IdP.
-    // The Apple button stays visible everywhere it is
-    // mocked, but while this is false signIn(.apple) shows
-    // the enrolment note instead of launching a flow whose
-    // identity_provider deep-link would fail against a pool
-    // with no Apple IdP. Flip it when the IdP is configured.
-    static let appleEnabled = false
+    static let hostedDomain = "auth.starterdev.com"
+    static let clientID = "t9qo46sedoq0k52i68uf4pl9v"   // the Mac app client (pool us-east-1_JvBBixLP9)
+    // Apple sign-in returns when the Apple Developer
+    // enrolment and a Cognito Apple IdP exist (removed
+    // Nov 25, 2026 — it relied on a paid enrolment).
     static let callbackScheme = "io.starterdev.clipkeep"
     static let redirectURI = "io.starterdev.clipkeep://auth"
 
@@ -1089,8 +1084,8 @@ enum AuthConfig {
     static var tokenEndpoint: String { "https://\(hostedDomain)/oauth2/token" }
     static var revokeEndpoint: String { "https://\(hostedDomain)/oauth2/revoke" }
 
-    // The authorize URL for one provider. Google and Apple
-    // deep-link their hosted-UI identity provider; email
+    // The authorize URL for one provider. Google
+    // deep-links its hosted-UI identity provider; email
     // opens the plain hosted UI, whose passwordless email
     // one-time code is a native Cognito (Essentials) first
     // factor — no custom challenge Lambdas.
@@ -1128,14 +1123,13 @@ enum AuthConfig {
 }
 
 enum AuthProvider {
-    case google, apple, email
+    case google, email
 
     // The hosted UI's identity_provider value; nil = the
     // plain hosted UI (email code lives there).
     var identityProviderParameter: String? {
         switch self {
         case .google: return "Google"
-        case .apple: return "SignInWithApple"
         case .email: return nil
         }
     }
@@ -1362,7 +1356,6 @@ final class AuthManager: NSObject, ASWebAuthenticationPresentationContextProvidi
     // the delete-unavailable note.
     var onStateChange: (() -> Void)?
     var onNotConfigured: (() -> Void)?
-    var onAppleUnavailable: (() -> Void)?
     var onDeleteUnavailable: (() -> Void)?
     // The window the system auth sheet anchors to — the
     // Settings window or the panel, whichever invoked it.
@@ -1396,12 +1389,6 @@ final class AuthManager: NSObject, ASWebAuthenticationPresentationContextProvidi
     func signIn(provider: AuthProvider, loginHint: String? = nil) {
         guard AuthConfig.isConfigured else {
             onNotConfigured?()
-            return
-        }
-        // Apple is deferred (see AuthConfig.appleEnabled):
-        // the note, never a flow the pool can't answer.
-        if provider == .apple, !AuthConfig.appleEnabled {
-            onAppleUnavailable?()
             return
         }
         guard webSession == nil else { return }
@@ -1747,7 +1734,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             self?.refreshSettingsAccount()
         }
         auth.onNotConfigured = { [weak self] in self?.showAccountsNotLiveAlert() }
-        auth.onAppleUnavailable = { [weak self] in self?.showAppleUnavailableAlert() }
         auth.onDeleteUnavailable = { [weak self] in self?.showDeleteUnavailableAlert() }
         refreshSyncView()
         auth.refreshIfNeeded()
@@ -3907,11 +3893,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         return label
     }
 
-    // The two sign-in buttons from the mocks — Apple above
-    // Google at equal size (Apple's HIG order), shared by
-    // the panel card and the Settings tab. Text-only in this
-    // skeleton: the provider glyphs are brand artwork the
-    // single-file build doesn't carry yet.
+    // The Google sign-in button from the mocks, shared by
+    // the panel card and the Settings tab. Text-only in
+    // this skeleton: the provider glyph is brand artwork
+    // the single-file build doesn't carry yet.
     private func socialButton(title: String, background: NSColor, foreground: NSColor,
                               bordered: Bool, action: Selector) -> NSButton {
         let button = HoverButton(frame: .zero)
@@ -3924,8 +3909,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         // controls answer the pointer instead of feeling dead
         // for a beat while the sheet or alert gathers itself.
         // The washes shift the rest colour toward the
-        // foreground — that darkens the white Google button
-        // and lightens the black Apple one. Identical at rest.
+        // foreground — that darkens the white Google
+        // button. Identical at rest.
         button.normalBG = background
         button.hoverBG = background.blended(withFraction: 0.08, of: foreground) ?? background
         button.pressedBG = background.blended(withFraction: 0.16, of: foreground) ?? background
@@ -4079,10 +4064,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         connectGoogle.bezelStyle = .rounded
         connectGoogle.controlSize = .small
         accountStack.addArrangedSubview(connectGoogle)
-        let connectApple = NSButton(title: "Connect Apple", target: self, action: #selector(signInAppleClicked(_:)))
-        connectApple.bezelStyle = .rounded
-        connectApple.controlSize = .small
-        accountStack.addArrangedSubview(connectApple)
         let signOut = NSButton(title: "Sign Out", target: self, action: #selector(signOutClicked))
         signOut.bezelStyle = .rounded
         signOut.controlSize = .small
@@ -4185,9 +4166,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         headline.font = NSFont.systemFont(ofSize: 16.5, weight: .semibold)
         invite.addArrangedSubview(headline)
         invite.addArrangedSubview(syncWrappingLabel("Sign in to sync this Mac's history with ClipKeep on Android, iOS and Web. Sensitive clips never sync.", size: 12, maxWidth: 416))
-        let appleButton = socialButton(title: "Sign in with Apple", background: .black, foreground: .white,
-                                       bordered: false, action: #selector(signInAppleClicked(_:)))
-        invite.addArrangedSubview(appleButton)
         let googleButton = socialButton(title: "Sign in with Google", background: .white,
                                         foreground: NSColor(white: 0.2, alpha: 1),
                                         bordered: true, action: #selector(signInGoogleClicked(_:)))
@@ -4240,7 +4218,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         reassuranceRow.alignment = .centerY
         reassuranceRow.spacing = 6
         invite.addArrangedSubview(reassuranceRow)
-        for view in [appleButton, googleButton, divider, emailRow] as [NSView] {
+        for view in [googleButton, divider, emailRow] as [NSView] {
             view.widthAnchor.constraint(equalTo: invite.widthAnchor).isActive = true
         }
 
@@ -4483,11 +4461,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         refreshSettingsAccount()
     }
 
-    @objc func signInAppleClicked(_ sender: NSButton) {
-        auth.anchorWindow = sender.window
-        auth.signIn(provider: .apple)
-    }
-
     @objc func signInGoogleClicked(_ sender: NSButton) {
         auth.anchorWindow = sender.window
         auth.signIn(provider: .google)
@@ -4536,15 +4509,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         let alert = NSAlert()
         alert.messageText = "Accounts aren't live yet"
         alert.informativeText = "Sign-in turns on when ClipKeep Cloud launches. ClipKeep stays fully local until then."
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
-    }
-
-    func showAppleUnavailableAlert() {
-        NSApp.activate(ignoringOtherApps: true)
-        let alert = NSAlert()
-        alert.messageText = "Apple sign-in isn't available yet"
-        alert.informativeText = "Apple sign-in arrives once the Apple Developer enrolment is complete — use Google or an email code for now."
         alert.addButton(withTitle: "OK")
         alert.runModal()
     }
@@ -6219,9 +6183,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         acctExplainer.textColor = .secondaryLabelColor
         acctExplainer.preferredMaxLayoutWidth = 440
         acctOut.addArrangedSubview(acctExplainer)
-        let acctApple = socialButton(title: "Sign in with Apple", background: .black, foreground: .white,
-                                     bordered: false, action: #selector(signInAppleClicked(_:)))
-        acctOut.addArrangedSubview(acctApple)
         let acctGoogle = socialButton(title: "Sign in with Google", background: .white,
                                       foreground: NSColor(white: 0.2, alpha: 1),
                                       bordered: true, action: #selector(signInGoogleClicked(_:)))
@@ -6298,9 +6259,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         acctIn.addArrangedSubview(NSTextField(labelWithString: "Devices: This Mac (this device)"))
         let acctConnectGoogle = NSButton(title: "Connect Google", target: self, action: #selector(signInGoogleClicked(_:)))
         acctConnectGoogle.bezelStyle = .rounded
-        let acctConnectApple = NSButton(title: "Connect Apple", target: self, action: #selector(signInAppleClicked(_:)))
-        acctConnectApple.bezelStyle = .rounded
-        let acctConnectRow = NSStackView(views: [acctConnectGoogle, acctConnectApple])
+        let acctConnectRow = NSStackView(views: [acctConnectGoogle])
         acctConnectRow.orientation = .horizontal
         acctConnectRow.spacing = 8
         acctIn.addArrangedSubview(acctConnectRow)
@@ -6320,8 +6279,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         acct.addArrangedSubview(acctIn)
         settingsAccountSignedInView = acctIn
 
-        // The social buttons span the tab's content width.
-        acctApple.widthAnchor.constraint(equalTo: acctOut.widthAnchor).isActive = true
+        // The social button spans the tab's content width.
         acctGoogle.widthAnchor.constraint(equalTo: acctOut.widthAnchor).isActive = true
 
         let acctItem = NSTabViewItem()
