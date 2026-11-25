@@ -290,6 +290,48 @@ final class ClipStore {
         save()
     }
 
+    // One-off purge (v2.19.0): remove every clip past the
+    // current keep-for period, right now, through the same
+    // tombstone + image-delete path as the automatic trim.
+    // Returns how many clips went; 0 when the period is
+    // Forever (nothing can be past it).
+    @discardableResult
+    func purgePastRetention() -> Int {
+        guard retentionDays > 0 else { return 0 }
+        let now = Date().timeIntervalSince1970
+        var removed = 0
+        var kept: [ClipItem] = []
+        for item in items {
+            if Self.isPastRetention(item, retentionDays: retentionDays, now: now) {
+                recordTombstone(item)
+                deleteImageFile(of: item)
+                removed += 1
+            } else {
+                kept.append(item)
+            }
+        }
+        if removed > 0 { items = kept; save() }
+        return removed
+    }
+
+    // On-disk footprint of the history store (v2.19.0): the
+    // history file plus every file in the images folder.
+    var diskUsageBytes: Int64 {
+        var total: Int64 = 0
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
+           let size = attrs[.size] as? NSNumber {
+            total += size.int64Value
+        }
+        if let files = try? FileManager.default.contentsOfDirectory(at: imagesDir, includingPropertiesForKeys: [.fileSizeKey]) {
+            for file in files {
+                if let size = (try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize {
+                    total += Int64(size)
+                }
+            }
+        }
+        return total
+    }
+
     // Prune the live list: keepers always stay; every other
     // clip rolls off when EITHER the count cap or the keep-for
     // period (v2.19.0) reaches it. Removals go through the
@@ -1586,6 +1628,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     var settingsPauseCheckbox: NSButton?
     var settingsLimitPopup: NSPopUpButton?
     var settingsRetentionPopup: NSPopUpButton?
+    var settingsStorageLabel: NSTextField?
+    var settingsPurgeButton: NSButton?
     var settingsThemePopup: NSPopUpButton?
     var settingsIconRadios: [NSButton] = []
     var settingsRTCheckbox: NSButton?
@@ -6010,6 +6054,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         settingsRetentionPopup = retentionPopup
         retentionRow.addArrangedSubview(retentionPopup)
         g.addArrangedSubview(retentionRow)
+        // Storage readout + one-off purge (v2.19.0): how much
+        // history there is and what it costs on disk, kept
+        // current by syncSettingsControls, and a button that
+        // runs the retention sweep on demand.
+        let storageLabel = NSTextField(labelWithString: "")
+        storageLabel.font = NSFont.systemFont(ofSize: 12)
+        storageLabel.textColor = .secondaryLabelColor
+        settingsStorageLabel = storageLabel
+        g.addArrangedSubview(storageLabel)
+        let purge = NSButton(title: "Purge Older Clips", target: self, action: #selector(purgeOlderClips))
+        purge.bezelStyle = .rounded
+        settingsPurgeButton = purge
+        g.addArrangedSubview(purge)
         let reset = NSButton(title: "Reset Panel Size", target: self, action: #selector(resetPanelSize))
         reset.bezelStyle = .rounded
         g.addArrangedSubview(reset)
@@ -6288,6 +6345,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                 popup.selectItem(at: i)
             }
         }
+        if let label = settingsStorageLabel {
+            label.stringValue = storageSummaryText()
+        }
+        refreshPurgeButton()
         if let popup = settingsThemePopup {
             for i in 0..<popup.numberOfItems where (popup.item(at: i)?.representedObject as? String) == currentTheme.id {
                 popup.selectItem(at: i)
@@ -6371,6 +6432,43 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
     @objc func settingsRetentionChanged(_ sender: NSPopUpButton) {
         if let mi = sender.selectedItem { retentionChosen(mi) }
+        // Picking a period trims immediately, so the storage
+        // line and the purge button follow in the same beat.
+        settingsStorageLabel?.stringValue = storageSummaryText()
+        refreshPurgeButton()
+    }
+
+    // The purge only has meaning against a period: at
+    // Forever it disables and its tooltip says why (v2.19.0).
+    func refreshPurgeButton() {
+        guard let purge = settingsPurgeButton else { return }
+        purge.isEnabled = store.retentionDays > 0
+        purge.toolTip = store.retentionDays > 0
+            ? "Delete unpinned, unboarded clips older than the keep-for period, now"
+            : "Choose a keep-for period above to purge clips by age"
+    }
+
+    // The Settings storage line (v2.19.0): clip count plus
+    // the history store's on-disk size.
+    func storageSummaryText() -> String {
+        let count = store.items.count
+        let size = ByteCountFormatter.string(fromByteCount: store.diskUsageBytes, countStyle: .file)
+        return "History: \(count) clip\(count == 1 ? "" : "s") · \(size) on disk"
+    }
+
+    @objc func purgeOlderClips() {
+        let days = store.retentionDays
+        let removed = store.purgePastRetention()
+        refreshList()
+        syncSettingsControls()
+        // The readout reports the outcome, so the click never
+        // feels dead (the v2.18.1 lesson); the next Settings
+        // sync restores the plain summary.
+        if let label = settingsStorageLabel {
+            label.stringValue = removed > 0
+                ? "Purged \(removed) clip\(removed == 1 ? "" : "s") older than \(days) days — \(storageSummaryText())"
+                : "Nothing older than \(days) days to purge — \(storageSummaryText())"
+        }
     }
 
     @objc func settingsThemeChanged(_ sender: NSPopUpButton) {

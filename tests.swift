@@ -320,8 +320,31 @@ struct ClipKeepTests {
         store.insert(liveClip("aged-pin", ageDays: 40, pinned: true))
         check("retention: a 40-day-old pinned clip survives",
               store.items.contains { $0.id == "aged-pin" })
+
+        // Purge (v2.19.0): the one-off sweep behind the
+        // Settings button. The stage is set directly on the
+        // store because every automatic path (insert, the
+        // setter) already trims — the purge exists for clips
+        // that cross the line while sitting in the list.
+        store.items = [liveClip("purge-old", ageDays: 40),
+                       liveClip("purge-new", ageDays: 2),
+                       liveClip("purge-pin", ageDays: 40, pinned: true)]
+        checkEqual("purge: removes exactly the past-period unpinned clips",
+                   store.purgePastRetention(), 1)
+        check("purge: the old clip is gone",
+              !store.items.contains { $0.id == "purge-old" })
+        check("purge: fresh and pinned clips stay",
+              store.items.contains { $0.id == "purge-new" } && store.items.contains { $0.id == "purge-pin" })
+        check("purge: the purged clip left a tombstone",
+              store.tombstones.contains { $0.id == "purge-old" })
         store.retentionDays = 0
+        checkEqual("purge: Forever purges nothing", store.purgePastRetention(), 0)
         UserDefaults.standard.removeObject(forKey: "retentionDays")
+
+        // Storage readout (v2.19.0): after a synchronous save
+        // the history file exists, so the footprint is > 0.
+        store.saveNow()
+        check("storage: disk usage counts the history store", store.diskUsageBytes > 0)
 
         // Theme legibility (Nov 18, 2026) — every theme's
         // footer icon tint, accent and on-accent must stay
