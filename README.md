@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/femisowems/clipkeep/actions/workflows/build.yml"><img src="https://github.com/femisowems/clipkeep/actions/workflows/build.yml/badge.svg" alt="Build status"></a>
-  <a href="https://github.com/femisowems/clipkeep/releases"><img src="https://img.shields.io/badge/version-v2.18.1-e4572e" alt="Latest version"></a>
+  <a href="https://github.com/femisowems/clipkeep/releases"><img src="https://img.shields.io/badge/version-v2.19.0-e4572e" alt="Latest version"></a>
   <a href="https://github.com/femisowems/clipkeep/releases"><img src="https://img.shields.io/github/downloads/femisowems/clipkeep/total" alt="Downloads"></a>
   <a href="https://github.com/femisowems/clipkeep/blob/main/LICENSE"><img src="https://img.shields.io/github/license/femisowems/clipkeep" alt="License"></a>
 </p>
@@ -24,7 +24,7 @@ copy never leaves your Mac.
 *(It keeps what you copy, for safekeeping.)*
 
 > 🚧 **Work in progress** — ClipKeep is under active development
-> (current release: **v2.18.1**). Features, behaviour and this README
+> (current release: **v2.19.0**). Features, behaviour and this README
 > may change between versions, and things may break.
 
 ---
@@ -136,12 +136,20 @@ holds whatever you copy.*
 - **Your history, your limit** — 200 unpinned clips by default, or
   500, 1000, or no limit. Identical copies are de-duplicated (copying
   the same thing again just brings it back to the top).
+- **Keep clips for…** (v2.19.0) — prefer a time limit? Settings →
+  General can also keep clips for 7, 30, 90, 180 or 365 days
+  (default: forever). A clip rolls off when either the count limit
+  or the age limit reaches it; pinned and boarded clips are exempt
+  from both. The same tab shows how many clips you have and what
+  they take on disk, with a **Purge Older Clips** button that runs
+  the age sweep on demand.
 - **Four panel themes** — Warm Tint (light, frosted), Midnight,
   Ember and Lagoon (dark), switchable from the ••• menu's Theme
   submenu and remembered between launches. A **Reduce Transparency**
   toggle makes the theme tint fully opaque.
 - **Settings window** (v2.7.0) — General (pause, history limit,
-  panel size, clear history), Appearance (theme, menu bar icon, Reduce
+  keep-for period, storage readout + purge, panel size, clear
+  history), Appearance (theme, menu bar icon, Reduce
   Transparency), Updates (version, status, check now) and Excluded
   Apps tabs, from the ••• menu (**⌘,**) or the menu-bar icon's right-click menu.
 - **One-click updates** (v2.6.0) — when a new version is out, a slim
