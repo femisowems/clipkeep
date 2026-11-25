@@ -1100,6 +1100,11 @@ enum AuthConfig {
     static var authorizeEndpoint: String { "https://\(hostedDomain)/oauth2/authorize" }
     static var tokenEndpoint: String { "https://\(hostedDomain)/oauth2/token" }
     static var revokeEndpoint: String { "https://\(hostedDomain)/oauth2/revoke" }
+    // The Cognito IDP API endpoint for the native email
+    // code flow (v2.19.3) — a regional host, not the
+    // custom domain. The pool lives in us-east-1, so the
+    // region is a literal here.
+    static let idpEndpoint = "https://cognito-idp.us-east-1.amazonaws.com/"
 
     // The authorize URL for one provider. Google
     // deep-links its hosted-UI identity provider; email
@@ -1302,6 +1307,64 @@ func identityFromIDToken(_ token: String) -> AuthIdentity? {
                         subject: subject)
 }
 
+// MARK: Native email code flow (v2.19.3) — pure helpers
+//
+// The hosted-UI email path never reliably reached its
+// code page, so the email code flow runs natively against
+// the Cognito IDP API instead (the Mac client allows
+// USER_AUTH): InitiateAuth asks for an EMAIL_OTP
+// challenge, RespondToAuthChallenge answers it. A fresh
+// address gets the same challenge — the account is
+// created when the challenge completes — so nothing in
+// the UI distinguishes sign-up from sign-in. These
+// builders and the error copy are pure and pinned by
+// tests.swift.
+
+func initiateAuthBody(clientID: String, email: String) -> [String: Any] {
+    [
+        "ClientId": clientID,
+        "AuthFlow": "USER_AUTH",
+        "AuthParameters": [
+            "USERNAME": email,
+            "PREFERRED_CHALLENGE": "EMAIL_OTP"
+        ]
+    ]
+}
+
+func respondToAuthChallengeBody(clientID: String, email: String,
+                                code: String, session: String) -> [String: Any] {
+    [
+        "ClientId": clientID,
+        "ChallengeName": "EMAIL_OTP",
+        "Session": session,
+        "ChallengeResponses": [
+            "USERNAME": email,
+            "EMAIL_OTP_CODE": code
+        ]
+    ]
+}
+
+// Cognito's error names arrive in __type, sometimes
+// carrying a namespace prefix ("...#CodeMismatchException")
+// — match on the trailing name. The copy never echoes
+// Cognito's own message: it is written for engineers, not
+// for the person holding the code email.
+func otpErrorMessage(cognitoType: String?, message: String?) -> String {
+    let type = cognitoType?.split(separator: "#").last.map(String.init) ?? cognitoType
+    switch type {
+    case "CodeMismatchException":
+        return "That code didn't match. Check it and try again."
+    case "ExpiredCodeException":
+        return "That code has expired. Send a new one and try again."
+    case "NotAuthorizedException":
+        return "This sign-in can't be completed that way."
+    case "LimitExceededException", "TooManyRequestsException":
+        return "Too many attempts. Wait a few minutes and try again."
+    default:
+        return "Something went wrong talking to ClipKeep Cloud. Check your connection and try again."
+    }
+}
+
 // Tokens in ONE generic-password item, marked
 // ThisDeviceOnly: they must not roam via iCloud Keychain or
 // migrate to another Mac (RESEARCH-NOTES §4). Reads are
@@ -1363,10 +1426,32 @@ final class AuthManager: NSObject, ASWebAuthenticationPresentationContextProvidi
         case error(String)
     }
 
+    // The native email code flow's progress (v2.19.3),
+    // tracked apart from State: a code round trip is not a
+    // sign-in state, and the surfaces render it inside the
+    // signed-out card rather than as a global change.
+    enum OTPPhase: Equatable {
+        case idle
+        case sending
+        case awaitingCode(email: String, destination: String)
+        case confirming
+    }
+
     private(set) var state: State = .signedOut {
         didSet { onStateChange?() }
     }
     private(set) var session: AuthSession?
+
+    private(set) var otpPhase: OTPPhase = .idle {
+        didSet { onStateChange?() }
+    }
+    // The code card's error line. Set before the phase
+    // change that accompanies it wherever both move, so
+    // the refresh it fires already shows the final pair.
+    var otpError: String? {
+        didSet { onStateChange?() }
+    }
+    private var otpSession: String?
 
     // Wired by AppController: refresh the panel + Settings on
     // every transition, show the "not live yet" alert, and
@@ -1432,6 +1517,19 @@ final class AuthManager: NSObject, ASWebAuthenticationPresentationContextProvidi
             webSession = nil
             state = .error("Couldn't open the sign-in sheet.")
         }
+    }
+
+    // Cancels an in-flight web sign-in (v2.19.3): the
+    // sheet closes and the state restores to whatever it
+    // was. The completion the cancel triggers lands on
+    // the same restore, so the two can't fight.
+    func cancelWebSignIn() {
+        guard let web = webSession else { return }
+        webSession = nil
+        pendingVerifier = nil
+        pendingState = nil
+        web.cancel()
+        restoreState()
     }
 
     private func finishSignIn(callbackURL: URL?, error: Error?) {
@@ -1526,31 +1624,184 @@ final class AuthManager: NSObject, ASWebAuthenticationPresentationContextProvidi
             .joined(separator: "&")
             .data(using: .utf8)
         URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
-            var result: AuthSession?
+            var tokens: (idToken: String, accessToken: String, refreshToken: String?, expiresIn: Double)?
             if let data,
                let object = try? JSONSerialization.jsonObject(with: data),
                let json = object as? [String: Any],
                let idToken = json["id_token"] as? String,
-               let accessToken = json["access_token"] as? String,
-               let identity = identityFromIDToken(idToken) {
-                let expiresIn = (json["expires_in"] as? NSNumber)?.doubleValue ?? 3600
-                // Rotation: a new refresh token in the
-                // response always wins; only when the
-                // response omits one does the stored token
-                // carry over.
-                let refresh = (json["refresh_token"] as? String) ?? self?.session?.refreshToken ?? ""
-                result = AuthSession(idToken: idToken, accessToken: accessToken,
-                                     refreshToken: refresh,
-                                     expiresAt: Date().timeIntervalSince1970 + expiresIn,
-                                     identity: identity)
+               let accessToken = json["access_token"] as? String {
+                tokens = (idToken, accessToken, json["refresh_token"] as? String,
+                          (json["expires_in"] as? NSNumber)?.doubleValue ?? 3600)
             }
             DispatchQueue.main.async {
-                if let result {
-                    self?.session = result
-                    AuthKeychain.save(result)
+                var result: AuthSession?
+                if let tokens {
+                    result = self?.adoptSession(idToken: tokens.idToken,
+                                                accessToken: tokens.accessToken,
+                                                refreshToken: tokens.refreshToken,
+                                                expiresIn: tokens.expiresIn)
                 }
                 completion(result)
             }
+        }.resume()
+    }
+
+    // Adopts a fresh token set from either sign-in path
+    // (the OAuth token endpoint above, the email code
+    // flow below): builds the session, stores it, writes
+    // the Keychain BEFORE the state changes — a crash
+    // mid-write can't lose the session — clears any email
+    // code round trip still in flight, and lands on
+    // signed-in. Returns nil when the ID token doesn't
+    // decode. Call on the main queue.
+    @discardableResult
+    private func adoptSession(idToken: String, accessToken: String,
+                              refreshToken: String?, expiresIn: Double) -> AuthSession? {
+        guard let identity = identityFromIDToken(idToken) else { return nil }
+        // Rotation: a new refresh token in the response
+        // always wins; only when the response omits one
+        // does the stored token carry over. (The email
+        // code flow's response always carries one.)
+        let refresh = refreshToken ?? session?.refreshToken ?? ""
+        let newSession = AuthSession(idToken: idToken, accessToken: accessToken,
+                                     refreshToken: refresh,
+                                     expiresAt: Date().timeIntervalSince1970 + expiresIn,
+                                     identity: identity)
+        session = newSession
+        AuthKeychain.save(newSession)
+        if otpPhase != .idle || otpError != nil || otpSession != nil {
+            otpSession = nil
+            otpError = nil
+            otpPhase = .idle
+        }
+        state = .signedIn(identity)
+        return newSession
+    }
+
+    // MARK: Native email code flow (v2.19.3)
+
+    // Asks Cognito to email a one-time code. Also the
+    // Resend path: calling again with the same address
+    // starts a fresh challenge with a fresh session.
+    func startEmailOTP(email: String) {
+        switch otpPhase {
+        case .idle, .awaitingCode: break
+        case .sending, .confirming: return
+        }
+        let address = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !address.isEmpty, address.contains("@") else {
+            otpError = "Enter your email address first."
+            return
+        }
+        guard AuthConfig.isConfigured else {
+            onNotConfigured?()
+            return
+        }
+        otpError = nil
+        otpPhase = .sending
+        performIDPRequest(target: "AWSCognitoIdentityProviderService.InitiateAuth",
+                          body: initiateAuthBody(clientID: AuthConfig.clientID, email: address)) { [weak self] json, errorType, _ in
+            guard let self, self.otpPhase == .sending else { return }
+            if let json, let result = json["AuthenticationResult"] as? [String: Any] {
+                // No challenge was needed — rare, but the
+                // tokens are the whole point either way.
+                if self.completeOTPSignIn(result) { return }
+                self.otpError = otpErrorMessage(cognitoType: nil, message: nil)
+                self.otpPhase = .idle
+                return
+            }
+            if let json, (json["ChallengeName"] as? String) == "EMAIL_OTP",
+               let session = json["Session"] as? String {
+                let parameters = json["ChallengeParameters"] as? [String: Any]
+                let destination = parameters?["CODE_DELIVERY_DESTINATION"] as? String ?? address
+                self.otpSession = session
+                self.otpPhase = .awaitingCode(email: address, destination: destination)
+                return
+            }
+            self.otpError = otpErrorMessage(cognitoType: errorType, message: nil)
+            self.otpPhase = .idle
+        }
+    }
+
+    func confirmEmailOTP(code: String) {
+        guard case .awaitingCode(let email, let destination) = otpPhase,
+              let sentSession = otpSession else { return }
+        let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            otpError = "Enter the code from the email first."
+            return
+        }
+        otpError = nil
+        otpPhase = .confirming
+        performIDPRequest(target: "AWSCognitoIdentityProviderService.RespondToAuthChallenge",
+                          body: respondToAuthChallengeBody(clientID: AuthConfig.clientID,
+                                                           email: email, code: trimmed,
+                                                           session: sentSession)) { [weak self] json, errorType, _ in
+            guard let self else { return }
+            // A cancel (or a newer flow) while the answer
+            // was in flight wins: the late response is not
+            // adopted.
+            guard self.otpPhase == .confirming, self.otpSession == sentSession else { return }
+            if let json, let result = json["AuthenticationResult"] as? [String: Any],
+               self.completeOTPSignIn(result) {
+                return
+            }
+            // Back to code entry with the reason showing.
+            // The stored session usually survives a wrong
+            // or expired code; if Cognito killed it, the
+            // next answer fails too and Resend starts over.
+            self.otpError = otpErrorMessage(cognitoType: errorType, message: nil)
+            self.otpPhase = .awaitingCode(email: email, destination: destination)
+        }
+    }
+
+    func cancelEmailOTP() {
+        otpSession = nil
+        otpError = nil
+        otpPhase = .idle
+    }
+
+    // The AuthenticationResult half of either IDP call.
+    // Its keys are CamelCase, unlike the OAuth token
+    // endpoint's snake_case.
+    private func completeOTPSignIn(_ tokenJSON: [String: Any]) -> Bool {
+        guard let idToken = tokenJSON["IdToken"] as? String,
+              let accessToken = tokenJSON["AccessToken"] as? String else { return false }
+        let expiresIn = (tokenJSON["ExpiresIn"] as? NSNumber)?.doubleValue ?? 3600
+        return adoptSession(idToken: idToken, accessToken: accessToken,
+                            refreshToken: tokenJSON["RefreshToken"] as? String,
+                            expiresIn: expiresIn) != nil
+    }
+
+    // One Cognito IDP API round trip. The completion runs
+    // on the main queue with the parsed payload and, for
+    // an error payload, its __type and message (the UI
+    // copy comes from otpErrorMessage, never from
+    // Cognito's own wording).
+    private func performIDPRequest(target: String, body: [String: Any],
+                                   completion: @escaping ([String: Any]?, String?, String?) -> Void) {
+        guard let url = URL(string: AuthConfig.idpEndpoint),
+              let httpBody = try? JSONSerialization.data(withJSONObject: body) else {
+            DispatchQueue.main.async { completion(nil, nil, nil) }
+            return
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/x-amz-json-1.1", forHTTPHeaderField: "Content-Type")
+        request.setValue(target, forHTTPHeaderField: "X-Amz-Target")
+        request.httpBody = httpBody
+        URLSession.shared.dataTask(with: request) { data, _, _ in
+            var json: [String: Any]?
+            var errorType: String?
+            var errorMessage: String?
+            if let data,
+               let object = try? JSONSerialization.jsonObject(with: data),
+               let parsed = object as? [String: Any] {
+                json = parsed
+                errorType = parsed["__type"] as? String
+                errorMessage = parsed["message"] as? String
+            }
+            DispatchQueue.main.async { completion(json, errorType, errorMessage) }
         }.resume()
     }
 
@@ -1570,6 +1821,9 @@ final class AuthManager: NSObject, ASWebAuthenticationPresentationContextProvidi
         }
         session = nil
         AuthKeychain.clear()
+        otpSession = nil
+        otpError = nil
+        otpPhase = .idle
         state = .signedOut
     }
 
@@ -1682,6 +1936,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     var syncIdentityLabel: NSTextField!
     var syncEmailLabel: NSTextField!
     var syncEmailField: NSTextField!
+    var syncEmailButton: NSButton!
+    var syncEmailErrorLabel: NSTextField!
+    var syncOTPBlock: NSStackView!
+    var syncOTPLabel: NSTextField!
+    var syncOTPField: NSTextField!
+    var syncOTPConfirmButton: NSButton!
+    var syncOTPResendButton: NSButton!
+    var syncOTPErrorLabel: NSTextField!
+    var syncWaitingRow: NSStackView!
     var syncDeviceDot: NSView!
     var syncEscChip: NSView!
     var syncEscLabel: NSTextField!
@@ -1693,6 +1956,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     var settingsSyncCheckbox: NSButton?
     var settingsSyncStatusLabel: NSTextField?
     var settingsEmailField: NSTextField?
+    var settingsEmailButton: NSButton?
+    var settingsEmailErrorLabel: NSTextField?
+    var settingsOTPBlock: NSStackView?
+    var settingsOTPLabel: NSTextField?
+    var settingsOTPField: NSTextField?
+    var settingsOTPConfirmButton: NSButton?
+    var settingsOTPResendButton: NSButton?
+    var settingsOTPErrorLabel: NSTextField?
+    // The auth state the last onStateChange refresh saw —
+    // the land-on-Sync rule (v2.19.3) fires only on a real
+    // transition INTO signed-in, never on a refresh.
+    var previousAuthState: AuthManager.State = .signedOut
 
     // Panel-open bookkeeping (v2.18.1): the first open after
     // a launch still needs togglePanel's second rebuild (the
@@ -1749,9 +2024,28 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         buildPanel()
         // Account wiring (v2.18.0): one AuthManager, two
         // surfaces (panel Sync view + Settings Account tab).
+        previousAuthState = auth.state
         auth.onStateChange = { [weak self] in
-            self?.refreshSyncView()
-            self?.refreshSettingsAccount()
+            guard let self else { return }
+            let wasSignedIn: Bool
+            if case .signedIn = previousAuthState { wasSignedIn = true } else { wasSignedIn = false }
+            let isSignedIn: Bool
+            if case .signedIn = auth.state { isSignedIn = true } else { isSignedIn = false }
+            previousAuthState = auth.state
+            refreshSyncView()
+            refreshSettingsAccount()
+            // Land on Sync (v2.19.3): a fresh interactive
+            // sign-in while the panel is up opens the Sync
+            // view, so the person sees the account they
+            // just signed into instead of being dropped
+            // back on the clips. A launch-restored session
+            // never transitions (the state was already
+            // signed-in when this was wired) and a token
+            // refresh stays signed-in throughout, so
+            // neither yanks the view.
+            if !wasSignedIn, isSignedIn, panel != nil, panel.isVisible {
+                setSyncView(open: true)
+            }
         }
         auth.onNotConfigured = { [weak self] in self?.showAccountsNotLiveAlert() }
         auth.onDeleteUnavailable = { [weak self] in self?.showDeleteUnavailableAlert() }
@@ -4260,17 +4554,100 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         syncEmailField = emailField
         // Return in the field is the button (v2.18.1): the
         // field's action fires on end editing and lands on
-        // the same handler, which reads the field's value as
-        // the login hint.
+        // the same handler, which reads the field's value —
+        // since v2.19.3, as the address the native code
+        // flow sends to.
         emailField.target = self
         emailField.action = #selector(signInEmailClicked(_:))
         let emailButton = NSButton(title: "Email me a code", target: self, action: #selector(signInEmailClicked(_:)))
         emailButton.bezelStyle = .rounded
+        syncEmailButton = emailButton
         let emailRow = NSStackView(views: [emailField, emailButton])
         emailRow.orientation = .horizontal
         emailRow.alignment = .centerY
         emailRow.spacing = 9
         invite.addArrangedSubview(emailRow)
+        // Send-side errors (v2.19.3): a missing address, a
+        // refused send — shown under the email row while
+        // no code round trip is live.
+        let emailError = NSTextField(wrappingLabelWithString: "")
+        emailError.font = NSFont.systemFont(ofSize: 11.5)
+        emailError.textColor = .systemRed
+        emailError.preferredMaxLayoutWidth = 416
+        emailError.isHidden = true
+        syncEmailErrorLabel = emailError
+        invite.addArrangedSubview(emailError)
+        // Code entry (v2.19.3): appears once a code is on
+        // its way, driven by refreshSyncView from
+        // AuthManager's OTP phase. Built once here — the
+        // refresh only toggles and relabels, so a typed
+        // code survives the state changes around it.
+        let otpLabel = NSTextField(wrappingLabelWithString: "")
+        otpLabel.font = NSFont.systemFont(ofSize: 12)
+        otpLabel.preferredMaxLayoutWidth = 416
+        syncOTPLabel = otpLabel
+        let otpField = NSTextField()
+        otpField.placeholderString = "6-digit code"
+        otpField.font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .regular)
+        otpField.alignment = .center
+        otpField.widthAnchor.constraint(equalToConstant: 130).isActive = true
+        otpField.target = self
+        otpField.action = #selector(syncOTPConfirmClicked(_:))
+        syncOTPField = otpField
+        let otpConfirm = NSButton(title: "Sign in", target: self, action: #selector(syncOTPConfirmClicked(_:)))
+        otpConfirm.bezelStyle = .rounded
+        syncOTPConfirmButton = otpConfirm
+        let otpCodeRow = NSStackView(views: [otpField, otpConfirm])
+        otpCodeRow.orientation = .horizontal
+        otpCodeRow.alignment = .centerY
+        otpCodeRow.spacing = 9
+        let otpResend = NSButton(title: "Resend code", target: self, action: #selector(otpResendClicked))
+        otpResend.bezelStyle = .inline
+        otpResend.isBordered = false
+        otpResend.font = NSFont.systemFont(ofSize: 11.5)
+        otpResend.contentTintColor = .secondaryLabelColor
+        syncOTPResendButton = otpResend
+        let otpDifferent = NSButton(title: "Use a different email", target: self, action: #selector(otpCancelClicked))
+        otpDifferent.bezelStyle = .inline
+        otpDifferent.isBordered = false
+        otpDifferent.font = NSFont.systemFont(ofSize: 11.5)
+        otpDifferent.contentTintColor = .secondaryLabelColor
+        let otpQuietRow = NSStackView(views: [otpResend, otpDifferent])
+        otpQuietRow.orientation = .horizontal
+        otpQuietRow.alignment = .centerY
+        otpQuietRow.spacing = 14
+        let otpError = NSTextField(wrappingLabelWithString: "")
+        otpError.font = NSFont.systemFont(ofSize: 11.5)
+        otpError.textColor = .systemRed
+        otpError.preferredMaxLayoutWidth = 416
+        otpError.isHidden = true
+        syncOTPErrorLabel = otpError
+        let otpBlock = NSStackView()
+        otpBlock.orientation = .vertical
+        otpBlock.alignment = .leading
+        otpBlock.spacing = 8
+        otpBlock.addArrangedSubview(otpLabel)
+        otpBlock.addArrangedSubview(otpCodeRow)
+        otpBlock.addArrangedSubview(otpQuietRow)
+        otpBlock.addArrangedSubview(otpError)
+        otpBlock.isHidden = true
+        syncOTPBlock = otpBlock
+        invite.addArrangedSubview(otpBlock)
+        // Waiting row (v2.19.3): the web (Google) flow
+        // leaves the app in a browser sheet — while it's
+        // out, the card says where it went and offers the
+        // way back.
+        let waitingLabel = syncWrappingLabel("Finish signing in in the browser window that opened — macOS may ask to open it first; that's expected.", size: 11.5, maxWidth: 330)
+        let waitingCancel = NSButton(title: "Cancel", target: self, action: #selector(cancelWebSignInClicked))
+        waitingCancel.bezelStyle = .rounded
+        waitingCancel.controlSize = .small
+        let waitingRow = NSStackView(views: [waitingLabel, waitingCancel])
+        waitingRow.orientation = .horizontal
+        waitingRow.alignment = .centerY
+        waitingRow.spacing = 9
+        waitingRow.isHidden = true
+        syncWaitingRow = waitingRow
+        invite.addArrangedSubview(waitingRow)
         let lockSmall = NSImageView()
         lockSmall.image = NSImage(systemSymbolName: "lock.fill", accessibilityDescription: nil)
         lockSmall.contentTintColor = .secondaryLabelColor
@@ -4282,7 +4659,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         reassuranceRow.alignment = .centerY
         reassuranceRow.spacing = 6
         invite.addArrangedSubview(reassuranceRow)
-        for view in [googleButton, divider, emailRow] as [NSView] {
+        for view in [googleButton, divider, emailRow, emailError, otpBlock, waitingRow] as [NSView] {
             view.widthAnchor.constraint(equalTo: invite.widthAnchor).isActive = true
         }
 
@@ -4400,6 +4777,36 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
         syncIdentityLabel.stringValue = accountDisplayName(identity)
         syncEmailLabel.stringValue = identity?.email ?? ""
+
+        // Native email code (v2.19.3): the send button's
+        // state, the code block, both error lines and the
+        // web flow's waiting row all read off AuthManager.
+        // The block's label is set on the awaiting-code
+        // transition and left alone while confirming (the
+        // confirming phase carries no destination).
+        let phase = auth.otpPhase
+        syncEmailButton.title = phase == .sending ? "Sending…" : "Email me a code"
+        syncEmailButton.isEnabled = phase != .sending && phase != .confirming
+        switch phase {
+        case .awaitingCode(_, let destination):
+            syncOTPLabel.stringValue = "Enter the 6-digit code sent to \(destination)"
+            syncOTPBlock.isHidden = false
+        case .confirming:
+            syncOTPBlock.isHidden = false
+        case .idle, .sending:
+            syncOTPBlock.isHidden = true
+        }
+        syncOTPConfirmButton.title = phase == .confirming ? "Signing in…" : "Sign in"
+        syncOTPConfirmButton.isEnabled = phase != .confirming
+        var otpAwaiting = false
+        if case .awaitingCode = phase { otpAwaiting = true }
+        syncOTPResendButton.isEnabled = otpAwaiting
+        let otpErrorText = auth.otpError ?? ""
+        syncOTPErrorLabel.stringValue = otpErrorText
+        syncOTPErrorLabel.isHidden = otpErrorText.isEmpty || syncOTPBlock.isHidden
+        syncEmailErrorLabel.stringValue = phase == .idle ? otpErrorText : ""
+        syncEmailErrorLabel.isHidden = !(phase == .idle && !otpErrorText.isEmpty)
+        syncWaitingRow.isHidden = auth.state != .signingIn
     }
 
     // The avatar's face (v2.19.2): one disc, both states —
@@ -4521,10 +4928,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     // hosted UI once configured).
     func syncEnabledChanged(_ on: Bool) {
         if on, auth.session == nil {
+            // Signed out: the toggle just turns back off and
+            // the sign-in card (already on screen in both
+            // surfaces) does the asking. It used to launch the
+            // hosted email sign-in here — the blank-window
+            // flow the Nov 25 Loom showed — so v2.19.3 makes
+            // the toggle launch nothing.
             syncEnabled = false
             refreshSyncView()
             refreshSettingsAccount()
-            auth.signIn(provider: .email)
             return
         }
         syncEnabled = on
@@ -4534,24 +4946,60 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
     @objc func signInGoogleClicked(_ sender: NSButton) {
         auth.anchorWindow = sender.window
-        auth.signIn(provider: .google)
+        // The address typed on the invoking surface rides
+        // along as a login hint (v2.19.3, mirroring the
+        // email path's v2.18.1 treatment), so the hosted
+        // UI pre-fills it instead of asking again. The
+        // sender's window says which surface asked: the
+        // Settings window or the panel.
+        let field = (sender.window != nil && sender.window == settingsWindow)
+            ? settingsEmailField : syncEmailField
+        auth.signIn(provider: .google, loginHint: emailHint(from: field))
     }
 
-    // The typed address rides along as a login hint
-    // (v2.18.1) — the hosted UI pre-fills it instead of
-    // asking again. The sender is the surface's "Email me a
-    // code" button or its email field itself: Return in the
-    // field fires the same action. (The Connect rows point
-    // at the sign-in handlers directly since v2.18.1 — the
+    // The email path is native now (v2.19.3): the code is
+    // requested and answered inside the app, no hosted UI.
+    // The sender is the surface's "Email me a code" button
+    // or its email field itself: Return in the field fires
+    // the same action. (The Connect rows point at the
+    // sign-in handlers directly since v2.18.1 — the
     // connect-prefixed duplicates were byte-identical.)
     @objc func signInEmailClicked(_ sender: NSControl) {
         auth.anchorWindow = sender.window
-        auth.signIn(provider: .email, loginHint: emailHint(from: syncEmailField))
+        auth.startEmailOTP(email: syncEmailField?.stringValue ?? "")
     }
 
     @objc func settingsEmailClicked(_ sender: NSControl) {
         auth.anchorWindow = sender.window
-        auth.signIn(provider: .email, loginHint: emailHint(from: settingsEmailField))
+        auth.startEmailOTP(email: settingsEmailField?.stringValue ?? "")
+    }
+
+    @objc func syncOTPConfirmClicked(_ sender: NSControl) {
+        auth.confirmEmailOTP(code: syncOTPField?.stringValue ?? "")
+    }
+
+    @objc func settingsOTPConfirmClicked(_ sender: NSControl) {
+        auth.confirmEmailOTP(code: settingsOTPField?.stringValue ?? "")
+    }
+
+    // Resend starts a fresh challenge for the address the
+    // current one was sent to — the phase carries it, so
+    // both surfaces share the handler.
+    @objc func otpResendClicked() {
+        guard case .awaitingCode(let email, _) = auth.otpPhase else { return }
+        auth.startEmailOTP(email: email)
+    }
+
+    // The panel's "Use a different email" and the Settings
+    // tab's "Cancel" are the same way out.
+    @objc func otpCancelClicked() {
+        auth.cancelEmailOTP()
+        syncOTPField?.stringValue = ""
+        settingsOTPField?.stringValue = ""
+    }
+
+    @objc func cancelWebSignInClicked() {
+        auth.cancelWebSignIn()
     }
 
     private func emailHint(from field: NSTextField?) -> String? {
@@ -6269,11 +6717,69 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         acctEmailField.action = #selector(settingsEmailClicked(_:))
         let acctEmailButton = NSButton(title: "Email me a code", target: self, action: #selector(settingsEmailClicked(_:)))
         acctEmailButton.bezelStyle = .rounded
+        settingsEmailButton = acctEmailButton
         let acctEmailRow = NSStackView(views: [acctEmailField, acctEmailButton])
         acctEmailRow.orientation = .horizontal
         acctEmailRow.alignment = .centerY
         acctEmailRow.spacing = 8
         acctOut.addArrangedSubview(acctEmailRow)
+        // Native email code (v2.19.3): the panel card's
+        // flow in compact form — a send error line, then
+        // the code block while a round trip is live.
+        let acctEmailError = NSTextField(wrappingLabelWithString: "")
+        acctEmailError.font = NSFont.systemFont(ofSize: 11.5)
+        acctEmailError.textColor = .systemRed
+        acctEmailError.preferredMaxLayoutWidth = 440
+        acctEmailError.isHidden = true
+        settingsEmailErrorLabel = acctEmailError
+        acctOut.addArrangedSubview(acctEmailError)
+        let acctOTPLabel = NSTextField(wrappingLabelWithString: "")
+        acctOTPLabel.font = NSFont.systemFont(ofSize: 12)
+        acctOTPLabel.preferredMaxLayoutWidth = 440
+        settingsOTPLabel = acctOTPLabel
+        let acctOTPField = NSTextField()
+        acctOTPField.placeholderString = "6-digit code"
+        acctOTPField.font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .regular)
+        acctOTPField.alignment = .center
+        acctOTPField.widthAnchor.constraint(equalToConstant: 120).isActive = true
+        acctOTPField.target = self
+        acctOTPField.action = #selector(settingsOTPConfirmClicked(_:))
+        settingsOTPField = acctOTPField
+        let acctOTPConfirm = NSButton(title: "Sign in", target: self, action: #selector(settingsOTPConfirmClicked(_:)))
+        acctOTPConfirm.bezelStyle = .rounded
+        settingsOTPConfirmButton = acctOTPConfirm
+        let acctOTPCodeRow = NSStackView(views: [acctOTPField, acctOTPConfirm])
+        acctOTPCodeRow.orientation = .horizontal
+        acctOTPCodeRow.alignment = .centerY
+        acctOTPCodeRow.spacing = 8
+        let acctOTPResend = NSButton(title: "Resend", target: self, action: #selector(otpResendClicked))
+        acctOTPResend.bezelStyle = .rounded
+        acctOTPResend.controlSize = .small
+        settingsOTPResendButton = acctOTPResend
+        let acctOTPCancel = NSButton(title: "Cancel", target: self, action: #selector(otpCancelClicked))
+        acctOTPCancel.bezelStyle = .rounded
+        acctOTPCancel.controlSize = .small
+        let acctOTPQuietRow = NSStackView(views: [acctOTPResend, acctOTPCancel])
+        acctOTPQuietRow.orientation = .horizontal
+        acctOTPQuietRow.alignment = .centerY
+        acctOTPQuietRow.spacing = 8
+        let acctOTPError = NSTextField(wrappingLabelWithString: "")
+        acctOTPError.font = NSFont.systemFont(ofSize: 11.5)
+        acctOTPError.textColor = .systemRed
+        acctOTPError.preferredMaxLayoutWidth = 440
+        acctOTPError.isHidden = true
+        settingsOTPErrorLabel = acctOTPError
+        let acctOTPBlock = NSStackView()
+        acctOTPBlock.orientation = .vertical
+        acctOTPBlock.alignment = .leading
+        acctOTPBlock.spacing = 8
+        acctOTPBlock.addArrangedSubview(acctOTPLabel)
+        acctOTPBlock.addArrangedSubview(acctOTPCodeRow)
+        acctOTPBlock.addArrangedSubview(acctOTPQuietRow)
+        acctOTPBlock.addArrangedSubview(acctOTPError)
+        acctOTPBlock.isHidden = true
+        settingsOTPBlock = acctOTPBlock
+        acctOut.addArrangedSubview(acctOTPBlock)
         let acctReassurance = NSTextField(labelWithString: "ClipKeep stays fully local if you never sign in.")
         acctReassurance.font = NSFont.systemFont(ofSize: 11)
         acctReassurance.textColor = .secondaryLabelColor
@@ -6409,6 +6915,34 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         }
         settingsSyncCheckbox?.state = syncEnabled ? .on : .off
         settingsSyncStatusLabel?.stringValue = syncStatusText()
+
+        // Native email code (v2.19.3), mirroring the panel
+        // card's refresh: same phase, same copy, compact
+        // rows. The label is set on the awaiting-code
+        // transition only — confirming carries no
+        // destination to re-read it from.
+        let phase = auth.otpPhase
+        settingsEmailButton?.title = phase == .sending ? "Sending…" : "Email me a code"
+        settingsEmailButton?.isEnabled = phase != .sending && phase != .confirming
+        switch phase {
+        case .awaitingCode(_, let destination):
+            settingsOTPLabel?.stringValue = "Enter the 6-digit code sent to \(destination)"
+            settingsOTPBlock?.isHidden = false
+        case .confirming:
+            settingsOTPBlock?.isHidden = false
+        case .idle, .sending:
+            settingsOTPBlock?.isHidden = true
+        }
+        settingsOTPConfirmButton?.title = phase == .confirming ? "Signing in…" : "Sign in"
+        settingsOTPConfirmButton?.isEnabled = phase != .confirming
+        var otpAwaiting = false
+        if case .awaitingCode = phase { otpAwaiting = true }
+        settingsOTPResendButton?.isEnabled = otpAwaiting
+        let otpErrorText = auth.otpError ?? ""
+        settingsOTPErrorLabel?.stringValue = otpErrorText
+        settingsOTPErrorLabel?.isHidden = otpErrorText.isEmpty || (settingsOTPBlock?.isHidden ?? true)
+        settingsEmailErrorLabel?.stringValue = phase == .idle ? otpErrorText : ""
+        settingsEmailErrorLabel?.isHidden = !(phase == .idle && !otpErrorText.isEmpty)
     }
 
     func syncStatusText() -> String {

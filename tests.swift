@@ -266,6 +266,55 @@ struct ClipKeepTests {
         check("auth: session needs refresh inside the skew window", session.needsRefresh(at: 1_800))
         check("auth: session fresh outside the skew window", !session.needsRefresh(at: 1_000))
 
+        // Native email code flow (v2.19.3) — the IDP API
+        // request bodies and the error copy. The wire shape
+        // was verified live against the pool: a wrong key
+        // or challenge name fails at a real sign-in, not in
+        // CI, unless it's pinned here.
+        let initiate = initiateAuthBody(clientID: AuthConfig.clientID, email: "femi@example.com")
+        checkEqual("otp: initiate flow is USER_AUTH",
+                   initiate["AuthFlow"] as? String, "USER_AUTH")
+        checkEqual("otp: initiate body carries the client id",
+                   initiate["ClientId"] as? String, AuthConfig.clientID)
+        checkEqual("otp: initiate body carries the username",
+                   (initiate["AuthParameters"] as? [String: String])?["USERNAME"], "femi@example.com")
+        checkEqual("otp: initiate asks for an email code",
+                   (initiate["AuthParameters"] as? [String: String])?["PREFERRED_CHALLENGE"], "EMAIL_OTP")
+        let respond = respondToAuthChallengeBody(clientID: AuthConfig.clientID,
+                                                 email: "femi@example.com",
+                                                 code: "123456", session: "session-123")
+        checkEqual("otp: respond names the email challenge",
+                   respond["ChallengeName"] as? String, "EMAIL_OTP")
+        checkEqual("otp: respond body carries the client id",
+                   respond["ClientId"] as? String, AuthConfig.clientID)
+        checkEqual("otp: respond body carries the session",
+                   respond["Session"] as? String, "session-123")
+        checkEqual("otp: respond body carries the username",
+                   (respond["ChallengeResponses"] as? [String: String])?["USERNAME"], "femi@example.com")
+        checkEqual("otp: respond body carries the code",
+                   (respond["ChallengeResponses"] as? [String: String])?["EMAIL_OTP_CODE"], "123456")
+        checkEqual("otp: wrong code message",
+                   otpErrorMessage(cognitoType: "CodeMismatchException", message: "nope"),
+                   "That code didn't match. Check it and try again.")
+        checkEqual("otp: expired code message",
+                   otpErrorMessage(cognitoType: "ExpiredCodeException", message: nil),
+                   "That code has expired. Send a new one and try again.")
+        checkEqual("otp: not-authorized message",
+                   otpErrorMessage(cognitoType: "NotAuthorizedException", message: nil),
+                   "This sign-in can't be completed that way.")
+        checkEqual("otp: limit message",
+                   otpErrorMessage(cognitoType: "LimitExceededException", message: nil),
+                   "Too many attempts. Wait a few minutes and try again.")
+        checkEqual("otp: too-many-requests message",
+                   otpErrorMessage(cognitoType: "TooManyRequestsException", message: nil),
+                   "Too many attempts. Wait a few minutes and try again.")
+        checkEqual("otp: unknown error falls back",
+                   otpErrorMessage(cognitoType: "SomethingElseException", message: "boom"),
+                   "Something went wrong talking to ClipKeep Cloud. Check your connection and try again.")
+        checkEqual("otp: missing error falls back",
+                   otpErrorMessage(cognitoType: nil, message: nil),
+                   "Something went wrong talking to ClipKeep Cloud. Check your connection and try again.")
+
         // Bytes whose standard base64 spelling uses +, / and =.
         let tricky = Data([0xfb, 0xff, 0xfe, 0x00, 0x01])
         let encodedB64 = base64URLEncode(tricky)
