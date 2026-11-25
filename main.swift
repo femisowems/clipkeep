@@ -96,6 +96,15 @@ final class ClipStore {
         set { defaults.set(newValue, forKey: "historyLimit"); trim(); save() }
     }
 
+    // Keep-for period in days (v2.19.0): unpinned/unboarded
+    // clips older than this roll off, whichever limit — count
+    // or age — reaches them first. 0 = keep forever, the
+    // default, so nothing changes until a user opts in.
+    var retentionDays: Int {
+        get { defaults.object(forKey: "retentionDays") as? Int ?? 0 }
+        set { defaults.set(newValue, forKey: "retentionDays"); trim(); save() }
+    }
+
     var boards: [String] {
         get { defaults.stringArray(forKey: "boards") ?? [] }
         set { defaults.set(newValue, forKey: "boards") }
@@ -113,6 +122,12 @@ final class ClipStore {
         fileURL = baseDir.appendingPathComponent("history.json")
         try? FileManager.default.createDirectory(at: imagesDir, withIntermediateDirectories: true)
         load()
+        // Age sweep (v2.19.0): time passes while the app is
+        // closed, so clips can cross the retention window with
+        // no capture to trigger a trim — prune once at launch.
+        let loadedCount = items.count
+        trim()
+        if items.count != loadedCount { save() }
     }
 
     // Stable per-install device identity, stamped onto new clips
@@ -152,6 +167,15 @@ final class ClipStore {
     // learn of the deletion.
     static func purgedTombstones(_ list: [ClipItem], now: Double) -> [ClipItem] {
         list.filter { now - $0.effectiveUpdatedAt < tombstoneRetention }
+    }
+
+    // The keep-for test (v2.19.0): a clip is past its retention
+    // period once its creation date sits more than retentionDays
+    // behind now. Keepers — pinned or boarded — never expire,
+    // and a period of 0 keeps everything forever.
+    static func isPastRetention(_ item: ClipItem, retentionDays: Int, now: Double) -> Bool {
+        guard retentionDays > 0, !item.isKeeper else { return false }
+        return now - item.createdAt > Double(retentionDays) * 24 * 60 * 60
     }
 
     func load() {
@@ -266,15 +290,25 @@ final class ClipStore {
         save()
     }
 
+    // Prune the live list: keepers always stay; every other
+    // clip rolls off when EITHER the count cap or the keep-for
+    // period (v2.19.0) reaches it. Removals go through the
+    // same tombstone + image-delete path as any other trim,
+    // so sync learns of them exactly like a manual delete.
     func trim() {
         let limit = historyLimit
-        guard limit > 0 else { return }
+        let days = retentionDays
+        guard limit > 0 || days > 0 else { return }
+        let now = Date().timeIntervalSince1970
         var seen = 0
         var kept: [ClipItem] = []
         for item in items {
             if item.isKeeper {
                 kept.append(item)
-            } else if seen < limit {
+            } else if Self.isPastRetention(item, retentionDays: days, now: now) {
+                recordTombstone(item)
+                deleteImageFile(of: item)
+            } else if limit == 0 || seen < limit {
                 seen += 1
                 kept.append(item)
             } else {
@@ -1551,6 +1585,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     var settingsWindow: NSWindow?
     var settingsPauseCheckbox: NSButton?
     var settingsLimitPopup: NSPopUpButton?
+    var settingsRetentionPopup: NSPopUpButton?
     var settingsThemePopup: NSPopUpButton?
     var settingsIconRadios: [NSButton] = []
     var settingsRTCheckbox: NSButton?
@@ -3713,6 +3748,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     @objc func limitChosen(_ sender: NSMenuItem) {
         if let value = sender.representedObject as? Int {
             store.historyLimit = value
+        }
+        refreshList()
+    }
+
+    @objc func retentionChosen(_ sender: NSMenuItem) {
+        if let value = sender.representedObject as? Int {
+            store.retentionDays = value
         }
         refreshList()
     }
@@ -5952,6 +5994,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         settingsLimitPopup = limitPopup
         limitRow.addArrangedSubview(limitPopup)
         g.addArrangedSubview(limitRow)
+        // Keep-for period (v2.19.0): the time-based companion
+        // to the history limit, same row shape and wiring.
+        let retentionRow = NSStackView()
+        retentionRow.orientation = .horizontal
+        retentionRow.spacing = 8
+        retentionRow.addArrangedSubview(NSTextField(labelWithString: "Keep clips for:"))
+        let retentionPopup = NSPopUpButton()
+        retentionPopup.addItems(withTitles: ["Forever", "7 days", "30 days", "90 days", "180 days", "1 year"])
+        for (i, value) in [0, 7, 30, 90, 180, 365].enumerated() {
+            retentionPopup.item(at: i)?.representedObject = value
+        }
+        retentionPopup.target = self
+        retentionPopup.action = #selector(settingsRetentionChanged(_:))
+        settingsRetentionPopup = retentionPopup
+        retentionRow.addArrangedSubview(retentionPopup)
+        g.addArrangedSubview(retentionRow)
         let reset = NSButton(title: "Reset Panel Size", target: self, action: #selector(resetPanelSize))
         reset.bezelStyle = .rounded
         g.addArrangedSubview(reset)
@@ -6225,6 +6283,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                 popup.selectItem(at: i)
             }
         }
+        if let popup = settingsRetentionPopup {
+            for i in 0..<popup.numberOfItems where (popup.item(at: i)?.representedObject as? Int) == store.retentionDays {
+                popup.selectItem(at: i)
+            }
+        }
         if let popup = settingsThemePopup {
             for i in 0..<popup.numberOfItems where (popup.item(at: i)?.representedObject as? String) == currentTheme.id {
                 popup.selectItem(at: i)
@@ -6304,6 +6367,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
     @objc func settingsLimitChanged(_ sender: NSPopUpButton) {
         if let mi = sender.selectedItem { limitChosen(mi) }
+    }
+
+    @objc func settingsRetentionChanged(_ sender: NSPopUpButton) {
+        if let mi = sender.selectedItem { retentionChosen(mi) }
     }
 
     @objc func settingsThemeChanged(_ sender: NSPopUpButton) {

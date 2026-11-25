@@ -36,6 +36,12 @@ no account, no network, free.
    window: add any installed app, remove with one click.
 9. **History limit choice** — 200 (default) / 500 / 1000 / unlimited
    unpinned clips, switchable in the panel footer.
+10. **Retention period (v2.19.0)** — optionally keep unpinned,
+    unboarded clips for 7 / 30 / 90 / 180 / 365 days (default:
+    forever). A clip rolls off when either the history limit or
+    the age limit reaches it; pins and boards are exempt from
+    both, and retention removals record sync tombstones like any
+    other deletion. Set in Settings → General ("Keep clips for").
 
 ## Deliberately out of scope
 
@@ -53,6 +59,6 @@ no account, no network, free.
 ## Compatibility
 
 - Existing v1 history files load unchanged (new fields are optional).
-- Settings (exclusions, boards, limit) live in UserDefaults under the
-  existing bundle id `io.starterdev.clipkeep`.
+- Settings (exclusions, boards, limit, retention) live in UserDefaults
+  under the existing bundle id `io.starterdev.clipkeep`.
 - Minimum system stays macOS 11.

@@ -273,6 +273,56 @@ struct ClipKeepTests {
               !encodedB64.contains("+") && !encodedB64.contains("/") && !encodedB64.contains("="))
         checkEqual("auth: base64url round-trips", base64URLDecode(encodedB64), tricky)
 
+        // Retention window (v2.19.0) — the keep-for period
+        // beside the count cap. Default 0 = forever, so
+        // behaviour is unchanged until a user opts in.
+        checkEqual("retention: default is keep forever", ClipStore().retentionDays, 0)
+        let retNow = 1_700_000_000.0
+        func agedClip(_ id: String, ageDays: Double, pinned: Bool = false, board: String? = nil) -> ClipItem {
+            ClipItem(id: id, kind: "text", text: id, imageFile: nil,
+                     createdAt: retNow - ageDays * 24 * 60 * 60, pinned: pinned,
+                     filePath: nil, sourceApp: nil, sourceBundleID: nil,
+                     ocrText: nil, board: board, contentHash: nil)
+        }
+        check("retention: a 31-day-old clip is past a 30-day window",
+              ClipStore.isPastRetention(agedClip("r-old", ageDays: 31), retentionDays: 30, now: retNow))
+        check("retention: a 1-day-old clip is inside a 30-day window",
+              !ClipStore.isPastRetention(agedClip("r-new", ageDays: 1), retentionDays: 30, now: retNow))
+        check("retention: forever (0) never expires a clip",
+              !ClipStore.isPastRetention(agedClip("r-old", ageDays: 31), retentionDays: 0, now: retNow))
+        check("retention: pinned clips are exempt",
+              !ClipStore.isPastRetention(agedClip("r-pin", ageDays: 31, pinned: true), retentionDays: 30, now: retNow))
+        check("retention: boarded clips are exempt",
+              !ClipStore.isPastRetention(agedClip("r-board", ageDays: 31, board: "B"), retentionDays: 30, now: retNow))
+
+        // End to end through the store: opting into 30 days
+        // prunes a 40-day-old unpinned clip on insert (with a
+        // tombstone, like any trim), keeps a fresh clip, and
+        // keeps an equally old pinned one. Runs last against
+        // this store — opting in also sweeps its ancient
+        // (createdAt = 1) unpinned test clips.
+        let realNow = Date().timeIntervalSince1970
+        func liveClip(_ id: String, ageDays: Double, pinned: Bool = false) -> ClipItem {
+            ClipItem(id: id, kind: "text", text: id, imageFile: nil,
+                     createdAt: realNow - ageDays * 24 * 60 * 60, pinned: pinned,
+                     filePath: nil, sourceApp: nil, sourceBundleID: nil,
+                     ocrText: nil, board: nil, contentHash: nil)
+        }
+        store.retentionDays = 30
+        store.insert(liveClip("aged-old", ageDays: 40))
+        check("retention: a 40-day-old clip is pruned at a 30-day setting",
+              !store.items.contains { $0.id == "aged-old" })
+        check("retention: the pruned clip left a tombstone",
+              store.tombstones.contains { $0.id == "aged-old" })
+        store.insert(liveClip("aged-new", ageDays: 2))
+        check("retention: a 2-day-old clip survives",
+              store.items.contains { $0.id == "aged-new" })
+        store.insert(liveClip("aged-pin", ageDays: 40, pinned: true))
+        check("retention: a 40-day-old pinned clip survives",
+              store.items.contains { $0.id == "aged-pin" })
+        store.retentionDays = 0
+        UserDefaults.standard.removeObject(forKey: "retentionDays")
+
         // Theme legibility (Nov 18, 2026) — every theme's
         // footer icon tint, accent and on-accent must stay
         // readable against the surfaces they sit on (WCAG
