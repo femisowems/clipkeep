@@ -314,6 +314,26 @@ struct ClipKeepTests {
         checkEqual("otp: missing error falls back",
                    otpErrorMessage(cognitoType: nil, message: nil),
                    "Something went wrong talking to ClipKeep Cloud. Check your connection and try again.")
+        checkEqual("otp: clipboard code, plain",
+                   otpCodeFromClipboard("123456"), "123456")
+        checkEqual("otp: clipboard code, padded",
+                   otpCodeFromClipboard(" 123456\n"), "123456")
+        checkEqual("otp: clipboard code, spaced groups",
+                   otpCodeFromClipboard("123 456"), "123456")
+        checkEqual("otp: clipboard code, hyphenated",
+                   otpCodeFromClipboard("123-456"), "123456")
+        checkEqual("otp: clipboard code, five digits is not a code",
+                   otpCodeFromClipboard("12345"), nil)
+        checkEqual("otp: clipboard code, seven digits is not a code",
+                   otpCodeFromClipboard("1234567"), nil)
+        checkEqual("otp: clipboard code, sentence is not a code",
+                   otpCodeFromClipboard("Your code is 123456"), nil)
+        checkEqual("otp: clipboard code, letters are not a code",
+                   otpCodeFromClipboard("abcdef"), nil)
+        checkEqual("otp: clipboard code, empty is not a code",
+                   otpCodeFromClipboard(""), nil)
+        checkEqual("otp: clipboard code, nil is not a code",
+                   otpCodeFromClipboard(nil), nil)
 
         // Bytes whose standard base64 spelling uses +, / and =.
         let tricky = Data([0xfb, 0xff, 0xfe, 0x00, 0x01])

@@ -1365,6 +1365,23 @@ func otpErrorMessage(cognitoType: String?, message: String?) -> String {
     }
 }
 
+/// The sign-in code a clipboard string carries, if it carries
+/// one (v2.19.4): ignoring spaces and hyphens, the whole string
+/// must be exactly six ASCII digits — "123456", " 123 456\n"
+/// and "123-456" all read as the same code, while a sentence
+/// containing a code, or a number of any other length, is not
+/// a code. Strict on purpose: this feeds an automatic
+/// sign-in attempt, so it may only fire on text that is
+/// unmistakably a copied code.
+func otpCodeFromClipboard(_ text: String?) -> String? {
+    guard let text else { return nil }
+    let stripped = text.filter { $0 != " " && $0 != "-" && $0 != "\t" && $0 != "\n" && $0 != "\r" }
+    guard stripped.count == 6,
+          stripped.unicodeScalars.allSatisfy({ $0.value >= 48 && $0.value <= 57 })
+    else { return nil }
+    return stripped
+}
+
 // Tokens in ONE generic-password item, marked
 // ThisDeviceOnly: they must not roam via iCloud Keychain or
 // migrate to another Mac (RESEARCH-NOTES §4). Reads are
@@ -2074,6 +2091,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         lastChangeCount = NSPasteboard.general.changeCount
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.pollClipboard()
+            self?.checkClipboardForOTPCode()
         }
         // Fresh timestamps (v2.11.0): the cards' relative times
         // ("39 minutes ago") otherwise only change when the list
@@ -4996,6 +5014,50 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         auth.cancelEmailOTP()
         syncOTPField?.stringValue = ""
         settingsOTPField?.stringValue = ""
+    }
+
+    // Clipboard code detection (v2.19.4, Femi's pick:
+    // auto-fill AND auto-sign-in). While a sign-in code is
+    // awaited, a freshly copied code fills both code fields
+    // and submits itself — ClipKeep watches the clipboard
+    // anyway; this puts that to work. The baseline is the
+    // pasteboard's changeCount when the wait began, so a code
+    // copied BEFORE the request can never fire it, and each
+    // clipboard change is auto-tried at most once (a failed
+    // attempt waits for a fresh copy, not a retry loop).
+    private var otpClipboardBaseline: Int?
+    private var otpClipboardTriedCount = 0
+
+    func checkClipboardForOTPCode() {
+        switch auth.otpPhase {
+        case .awaitingCode:
+            break
+        case .confirming:
+            return // an attempt is in flight; keep the baseline
+        case .idle, .sending:
+            otpClipboardBaseline = nil
+            return
+        }
+        let pb = NSPasteboard.general
+        guard let baseline = otpClipboardBaseline else {
+            otpClipboardBaseline = pb.changeCount
+            otpClipboardTriedCount = pb.changeCount
+            return
+        }
+        let count = pb.changeCount
+        guard count > baseline, count != otpClipboardTriedCount,
+              count != selfWriteChangeCount else { return }
+        // The capture path's privacy markers hold here too:
+        // a concealed or transient copy is never read as a code.
+        let types = pb.types ?? []
+        let concealed = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
+        let transient = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
+        if types.contains(concealed) || types.contains(transient) { return }
+        guard let code = otpCodeFromClipboard(pb.string(forType: .string)) else { return }
+        otpClipboardTriedCount = count
+        syncOTPField?.stringValue = code
+        settingsOTPField?.stringValue = code
+        auth.confirmEmailOTP(code: code)
     }
 
     @objc func cancelWebSignInClicked() {
