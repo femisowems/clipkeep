@@ -1391,6 +1391,27 @@ func otpErrorMessage(cognitoType: String?, message: String?) -> String {
     }
 }
 
+// What the user is told when an account deletion does NOT
+// go through. Every one of these paths leaves the account
+// fully intact, and the copy says so — a failed delete
+// must never read like a partial one. status is the HTTP
+// status of the DELETE /account answer (0 = no answer at
+// all: offline, DNS, timeout; 401 also stands in for "no
+// usable token could be had", where a refused refresh has
+// already ended the local session inside validIDToken —
+// the account itself is still not deleted, and the copy
+// says that too).
+func deleteAccountErrorMessage(status: Int) -> String {
+    switch status {
+    case 0:
+        return "Couldn't reach ClipKeep Cloud, so your account has not been deleted. Check your connection and try again."
+    case 401:
+        return "Your sign-in expired before the deletion went through, so your account has not been deleted. Sign in again and try once more."
+    default:
+        return "ClipKeep Cloud couldn't complete the deletion (error \(status)), so your account has not been deleted. Try again in a little while."
+    }
+}
+
 /// The sign-in code a clipboard string carries, if it carries
 /// one (v2.19.4): ignoring spaces and hyphens, the whole string
 /// must be exactly six ASCII digits — "123456", " 123 456\n"
@@ -1498,10 +1519,10 @@ final class AuthManager: NSObject, ASWebAuthenticationPresentationContextProvidi
 
     // Wired by AppController: refresh the panel + Settings on
     // every transition, show the "not live yet" alert, and
-    // the delete-unavailable note.
+    // surface why an account deletion didn't go through.
     var onStateChange: (() -> Void)?
     var onNotConfigured: (() -> Void)?
-    var onDeleteUnavailable: (() -> Void)?
+    var onDeleteFailed: ((String) -> Void)?
     // The window the system auth sheet anchors to — the
     // Settings window or the panel, whichever invoked it.
     weak var anchorWindow: NSWindow?
@@ -1893,13 +1914,72 @@ final class AuthManager: NSObject, ASWebAuthenticationPresentationContextProvidi
         state = .signedOut
     }
 
-    // Skeleton: the DELETE /account endpoint doesn't exist
-    // yet, so there is nothing honest to call. AppController
-    // confirms with the user first, then lands here — the
-    // answer is "enabled when sync launches", never a fake
-    // deletion.
-    func deleteAccount() {
-        onDeleteUnavailable?()
+    // Account deletion: DELETE /account wipes the Cognito
+    // user, every sync row and every stored image
+    // server-side. AppController confirms with the user
+    // first, then lands here. On success the completion
+    // receives the deleted account's subject — AppController
+    // finishes the local half that lives outside
+    // AuthManager through it (the sync engine's record for
+    // the account, the sync toggle) — while the session
+    // half happens here, as the same plain teardown as
+    // signOut's local part, minus the revoke: the tokens
+    // died with the user, so there is nothing to revoke.
+    // The teardown is assignments only, so it cannot half
+    // happen: once the server has said yes, this Mac lands
+    // signed out no matter what. On any failure the
+    // account AND the local session stay exactly as they
+    // were, and the reason surfaces through onDeleteFailed
+    // — with one inherited exception: if Cognito refuses
+    // the token refresh mid-flight, validIDToken ends the
+    // local session as it always has; the message still
+    // says plainly that the account was not deleted.
+    func deleteAccount(completion: @escaping (String) -> Void) {
+        guard let current = session else { return }
+        let subject = current.identity.subject
+        performDeleteAccount(isRetry: false) { [weak self] status in
+            guard let self else { return }
+            if (200..<300).contains(status) {
+                self.session = nil
+                AuthKeychain.clear()
+                self.otpSession = nil
+                self.otpError = nil
+                self.otpPhase = .idle
+                self.state = .signedOut
+                completion(subject)
+            } else {
+                self.onDeleteFailed?(deleteAccountErrorMessage(status: status))
+            }
+        }
+    }
+
+    // One DELETE /account round trip under the sync
+    // engine's auth rule (SYNC-ENGINE-DESIGN §3): the
+    // current ID token, and on 401 exactly one forced
+    // refresh and one retry. The completion runs on the
+    // main queue with the HTTP status — 0 when no answer
+    // arrived at all, 401 also when no token could be had.
+    private func performDeleteAccount(isRetry: Bool, completion: @escaping (Int) -> Void) {
+        validIDToken(forceRefresh: isRetry) { [weak self] token in
+            guard let self, let token else { completion(401); return }
+            guard let url = URL(string: "\(SyncEngine.apiBase)/account") else {
+                completion(0)
+                return
+            }
+            var request = URLRequest(url: url)
+            request.httpMethod = "DELETE"
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            URLSession.shared.dataTask(with: request) { _, response, _ in
+                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                DispatchQueue.main.async {
+                    if status == 401, !isRetry {
+                        self.performDeleteAccount(isRetry: true, completion: completion)
+                    } else {
+                        completion(status)
+                    }
+                }
+            }.resume()
+        }
     }
 }
 
@@ -2141,6 +2221,14 @@ final class SyncEngine {
 
     private var running = false
     private var followUpNeeded = false
+    // Account generations: resetAccountState (account
+    // deletion) bumps stateGeneration, and a cycle
+    // remembers the generation it started in
+    // (cycleGeneration). The moment they diverge, the
+    // cycle is working for an account that no longer
+    // exists and must stop without persisting anything.
+    private var stateGeneration = 0
+    private var cycleGeneration = 0
     private var debounceWork: DispatchWorkItem?
     private var imageFetchesInFlight: Set<String> = []
     // Clips whose bytes the cloud answered exists:false for —
@@ -2181,6 +2269,41 @@ final class SyncEngine {
         guard let subject = app?.auth.session?.identity.subject else { return nil }
         let stored = storedAccount()
         return stored.subject == subject ? stored.lastSyncAt : nil
+    }
+
+    // Account deletion's engine half, called from
+    // AppController once the server has confirmed the
+    // wipe: the deleted account's record must not survive
+    // — no watermark, no outbox, no acknowledged
+    // tombstones — and a cycle still in flight for it
+    // must not write the record back (the generation bump
+    // is what orphans it; see cycleIsCurrent). A record
+    // belonging to a different account is left alone: it
+    // isn't this deletion's to clear. (In practice the
+    // stored record is the deleted account's — only one
+    // is ever kept.)
+    func resetAccountState(for subject: String) {
+        stateGeneration += 1
+        debounceWork?.cancel()
+        debounceWork = nil
+        followUpNeeded = false
+        let stored = storedAccount()
+        if stored.subject == subject || stored.subject.isEmpty {
+            UserDefaults.standard.removeObject(forKey: Self.stateKey)
+        }
+        if state != .idle { state = .idle }
+    }
+
+    // True while the running cycle still belongs to the
+    // current account generation.
+    private var cycleIsCurrent: Bool { cycleGeneration == stateGeneration }
+
+    // An orphaned cycle stops here: no outcome, no
+    // persisted last-sync, nothing — its account is gone.
+    private func abortOrphanedCycle() {
+        running = false
+        followUpNeeded = false
+        state = .idle
     }
 
     // MARK: Triggers
@@ -2227,6 +2350,7 @@ final class SyncEngine {
     private func runCycle() {
         guard let app, let session = app.auth.session else { return }
         running = true
+        cycleGeneration = stateGeneration
         state = .syncing
         let subject = session.identity.subject
         // Persist the working record up front, so an account
@@ -2236,7 +2360,7 @@ final class SyncEngine {
     }
 
     private func finishCycle(_ outcome: State, synced: Bool = false) {
-        if synced, let subject = app?.auth.session?.identity.subject {
+        if synced, cycleIsCurrent, let subject = app?.auth.session?.identity.subject {
             var acct = workingAccount(for: subject)
             acct.lastSyncAt = Date().timeIntervalSince1970
             saveStoredAccount(acct)
@@ -2250,6 +2374,7 @@ final class SyncEngine {
     }
 
     private func pullPhase(subject: String) {
+        guard cycleIsCurrent else { abortOrphanedCycle(); return }
         guard app != nil else { finishCycle(.offline); return }
         let watermark = workingAccount(for: subject).watermark
         guard let url = URL(string: "\(Self.apiBase)/sync/pull?sinceRev=\(watermark)") else {
@@ -2278,6 +2403,7 @@ final class SyncEngine {
     // Apply one pull page in rev order, then — and only
     // then — advance the watermark to the page's end.
     private func applyPullPage(_ page: SyncPullResponse, subject: String) {
+        guard cycleIsCurrent else { abortOrphanedCycle(); return }
         guard let app else { return }
         var acct = workingAccount(for: subject)
         var changed = false
@@ -2354,6 +2480,7 @@ final class SyncEngine {
     }
 
     private func pushPhase(subject: String) {
+        guard cycleIsCurrent else { abortOrphanedCycle(); return }
         guard let app else { finishCycle(.offline); return }
         var acct = workingAccount(for: subject)
         // First sync for this account: everything local the
@@ -2450,6 +2577,7 @@ final class SyncEngine {
         request.httpBody = try? JSONEncoder().encode(SyncPushRequest(clips: records))
         apiCall(request) { [weak self] data, status in
             guard let self, let app = self.app else { return }
+            guard self.cycleIsCurrent else { self.abortOrphanedCycle(); return }
             if status == 401 { self.finishCycle(.signInExpired); return }
             guard status == 200, let data,
                   let response = try? JSONDecoder().decode(SyncPushResponse.self, from: data) else {
@@ -2919,7 +3047,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             if !wasSignedIn, isSignedIn { syncEngine.syncNow() }
         }
         auth.onNotConfigured = { [weak self] in self?.showAccountsNotLiveAlert() }
-        auth.onDeleteUnavailable = { [weak self] in self?.showDeleteUnavailableAlert() }
+        auth.onDeleteFailed = { [weak self] message in self?.showDeleteFailedAlert(message) }
         syncEngine.app = self
         syncEngine.onStateChange = { [weak self] in
             self?.refreshSyncView()
@@ -5995,7 +6123,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         alert.addButton(withTitle: "Delete Account")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        auth.deleteAccount()
+        auth.deleteAccount { [weak self] subject in
+            guard let self else { return }
+            // The server has wiped the account; finish the
+            // local half that lives outside AuthManager.
+            // The engine's record for the account goes, so
+            // no watermark or outbox survives it, and the
+            // sync toggle turns off — a deleted account
+            // must not leave sync armed for whoever signs
+            // in next. AuthManager already cleared the
+            // session and landed on signed-out, so the
+            // refreshes just paint the final state.
+            syncEngine.resetAccountState(for: subject)
+            syncEnabled = false
+            refreshSyncView()
+            refreshSettingsAccount()
+        }
     }
 
     func showAccountsNotLiveAlert() {
@@ -6007,11 +6150,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         alert.runModal()
     }
 
-    func showDeleteUnavailableAlert() {
+    func showDeleteFailedAlert(_ message: String) {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
-        alert.messageText = "Account deletion isn't available yet"
-        alert.informativeText = "Account deletion will be enabled when sync launches."
+        alert.messageText = "Your account was not deleted"
+        alert.informativeText = message
         alert.addButton(withTitle: "OK")
         alert.runModal()
     }
