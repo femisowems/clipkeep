@@ -38,8 +38,12 @@ plus the ROADMAP.
    femi.starterdev@gmail.com can sign in (Testing mode).
 4. [ ] **SES production access** — Cognito's default sender caps at
    50 emails/day; email-code sign-in needs the production limit.
-5. [ ] **AWS Budget + cost-anomaly alerts** — replaces the $20/mo
-   spend limit deleted by the Nov 25 activation.
+5. [x] **AWS Budget + cost-anomaly alerts** — DONE Nov 27, 2026:
+   budget "ClipKeep monthly cost guardrail" ($20/mo, email alerts
+   to femi.sowems@gmail.com at 50/80/100% actual + 100% forecast)
+   replaces the spend limit deleted by the Nov 25 activation;
+   Cost Anomaly Detection SERVICE monitor + daily email alerts
+   for anomalies ≥ $5 impact.
 6. [x] **CDK RemovalPolicy DESTROY → RETAIN** + redeploy the backend
    stack, so an accidental teardown can't take user data with it.
    DONE Nov 27, 2026 — table + bucket both Retain in the deployed
