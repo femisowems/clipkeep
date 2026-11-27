@@ -19,13 +19,15 @@ plus the ROADMAP.
 ## The list, in order
 
 ### Accounts & sync go-live
-1. [ ] **Mac sync engine** — backend is deployed and the sync API is
-   end-to-end tested (Nov 25), but the app does not sync yet; cloud
-   storage is provisioned and empty. Build against pool
-   us-east-1_JvBBixLP9 / the deployed API; LWW on server revs,
-   tombstones, image presign flow (all API-proven). Scope/design:
-   SYNC-ENGINE-DESIGN.md (Nov 27). Backend read leg added Nov 27:
-   presign gained `action: "download"` (the API previously had no
+1. [x] **Mac sync engine** — DONE Nov 27, 2026: built per
+   SYNC-ENGINE-DESIGN.md (outbox + pull watermark, push ≤100,
+   LWW with device-id tiebreak, tombstones, lazy image download),
+   PR #1 merged into `develop` (merge 01804b8, CI "ALL 163 CHECKS
+   PASSED"). Account deletion wired to DELETE /account the same
+   day — PR #3 merged into `develop` (merge 6ff46c8, "ALL 167
+   CHECKS PASSED"). Both land for users at the next release cut
+   (develop → main). Backend read leg added Nov 27 first: presign
+   gained `action: "download"` (the API previously had no
    image-download path); retest 17/17 (retest-2026-11-27.py in the
    backend directory).
 2. [ ] **Privacy policy** — written and hosted at a public URL;

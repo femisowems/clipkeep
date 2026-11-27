@@ -17,7 +17,7 @@ the `sub` comes from the token, never from the body).
 | `GET /sync/pull?sinceRev=N` | → `{ items: StoredClip[], currentRev, nextSinceRev, hasMore }`. Rows with `rev > N`, ascending, tombstones included (`deleted: true` rows in the same stream). Page cap 200; `hasMore` drives continuation. First sync is `sinceRev=0` — same path. |
 | `POST /sync/push` | `{ clips: ClipRecord[] }` (1–100) → `{ currentRev, results: [{ id, rev, applied, current? }] }`. Server reserves a contiguous rev range atomically, then writes each clip under an LWW condition on `updatedAt`. A clip that loses gets `applied: false` + the winning stored version in `current` — server wins true simultaneity; device id is the client-side tiebreak for equal timestamps. A delete is a push with `deleted: true` (becomes a TTL'd tombstone, 30 days). |
 | `POST /uploads/presign` | `{ sha256, contentType?, ext? }` → `{ exists, key }` or `{ exists: false, key, uploadUrl, expiresIn: 900 }`. Images are content-addressed (`users/<sub>/images/<aa>/<sha256>.<ext>`); bytes PUT straight to S3, never through Lambda. |
-| `DELETE /account` | Wipes the Cognito user, all sync rows, all S3 objects. Already wired to the app's delete-account action. |
+| `DELETE /account` | Wipes the Cognito user, all sync rows, all S3 objects. **Backend proven; the app side is NOT wired** — `AuthManager.deleteAccount()` is still the v2.18 skeleton stub (`onDeleteUnavailable`), verified during the engine build Nov 27. Wiring it (call + local sign-out + state reset) is a small follow-up item. |
 
 **ClipRecord** (wire schema 1): `id, kind (text|link|image|file|color),
 text?, linkTitle?, image? { file, sha256, width?, height? }, ocrText?,
