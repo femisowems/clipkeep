@@ -335,6 +335,170 @@ struct ClipKeepTests {
         checkEqual("otp: clipboard code, nil is not a code",
                    otpCodeFromClipboard(nil), nil)
 
+        // Sync engine — the wire mapping both directions,
+        // the LWW acceptance rule, watermark advancement and
+        // outbox batching. The wire shape was verified live
+        // against the deployed API (Nov 25–27, 2026); these
+        // pin the client half of that contract.
+        func localClip(id: String = "s1", kind: String = "text", text: String? = "hello") -> ClipItem {
+            ClipItem(id: id, kind: kind, text: text, imageFile: nil, createdAt: 400,
+                     pinned: false, filePath: nil, sourceApp: nil, sourceBundleID: nil,
+                     ocrText: nil, board: nil, contentHash: nil)
+        }
+        func wireRecord(id: String = "w1", kind: String = "text", text: String? = "hello",
+                        linkTitle: String? = nil, updatedAt: Double = 500,
+                        device: String = "dev-b") -> SyncClipRecord {
+            SyncClipRecord(schema: 1, id: id, kind: kind, text: text, linkTitle: linkTitle,
+                           image: nil, ocrText: nil, file: nil, sourceApp: nil, sourceId: nil,
+                           createdAt: 400, updatedAt: updatedAt, pinned: false, board: nil,
+                           origin: SyncOrigin(deviceId: device, platform: "mac"),
+                           deleted: false, rev: 7, serverUpdatedAt: 600)
+        }
+
+        // Mapping out: local clip → wire record.
+        var outClip = localClip()
+        outClip.pinned = true
+        outClip.board = "B"
+        outClip.sourceApp = "Safari"
+        outClip.sourceBundleID = "com.apple.Safari"
+        let outRecord = syncRecord(from: outClip, image: nil, fileSize: nil,
+                                   deviceID: "this-mac", deleted: false)
+        checkEqual("sync out: plain text stays text", outRecord.kind, "text")
+        check("sync out: core fields carried",
+              outRecord.text == "hello" && outRecord.createdAt == 400
+                  && outRecord.pinned && outRecord.board == "B")
+        check("sync out: source app + bundle id carried",
+              outRecord.sourceApp == "Safari" && outRecord.sourceId == "com.apple.Safari")
+        checkEqual("sync out: unstamped updatedAt falls back to createdAt", outRecord.updatedAt, 400)
+        check("sync out: origin falls back to this device",
+              outRecord.origin.deviceId == "this-mac" && outRecord.origin.platform == "mac")
+        var stampedClip = localClip(id: "s2")
+        stampedClip.originDevice = "other-mac"
+        checkEqual("sync out: a stamped origin wins over the fallback",
+                   syncRecord(from: stampedClip, image: nil, fileSize: nil,
+                              deviceID: "this-mac", deleted: false).origin.deviceId,
+                   "other-mac")
+        check("sync out: outgoing records never carry a rev", outRecord.rev == nil)
+        let linkRecord = syncRecord(from: localClip(kind: "text", text: "https://example.com/page"),
+                                    image: nil, fileSize: nil, deviceID: "this-mac", deleted: false)
+        checkEqual("sync out: a URL text clip becomes kind link", linkRecord.kind, "link")
+        checkEqual("sync out: the link URL rides in text", linkRecord.text, "https://example.com/page")
+        let colourRecord = syncRecord(from: localClip(kind: "color", text: "#FF8000"),
+                                      image: nil, fileSize: nil, deviceID: "this-mac", deleted: false)
+        check("sync out: colour clips carry their hex in text",
+              colourRecord.kind == "color" && colourRecord.text == "#FF8000")
+        var fileClip = localClip(kind: "file", text: nil)
+        fileClip.filePath = "/tmp/report.pdf"
+        let fileRecord = syncRecord(from: fileClip, image: nil, fileSize: 1234,
+                                    deviceID: "this-mac", deleted: false)
+        check("sync out: file clips sync metadata only",
+              fileRecord.file?.name == "report.pdf" && fileRecord.file?.size == 1234
+                  && fileRecord.file?.bytesSynced == false)
+        let imageRef = SyncImageRef(file: "users/u/images/ab/aabb.png", sha256: "aabb", width: 10, height: 20)
+        let imageRecord = syncRecord(from: localClip(kind: "image", text: nil), image: imageRef,
+                                     fileSize: nil, deviceID: "this-mac", deleted: false)
+        check("sync out: image clips carry the cloud ref",
+              imageRecord.image?.file == "users/u/images/ab/aabb.png" && imageRecord.image?.sha256 == "aabb")
+        check("sync out: a tombstone record is marked deleted",
+              syncRecord(from: localClip(), image: nil, fileSize: nil,
+                         deviceID: "this-mac", deleted: true).deleted)
+
+        // The encoded push body: no rev key on the wire.
+        let pushData = try! JSONEncoder().encode(SyncPushRequest(clips: [outRecord]))
+        let pushObj = (try! JSONSerialization.jsonObject(with: pushData)) as? [String: Any]
+        let pushedClip = (pushObj?["clips"] as? [[String: Any]])?.first
+        check("sync wire: encoded clips omit rev", pushedClip?["rev"] == nil)
+        checkEqual("sync wire: encoded clip kind", pushedClip?["kind"] as? String, "text")
+
+        // Mapping in: wire record → local clip.
+        let pulledLink = clipItem(from: wireRecord(kind: "link", text: "https://example.com/page",
+                                                   linkTitle: "Example"))
+        checkEqual("sync in: a link record lands as a text clip", pulledLink.kind, "text")
+        check("sync in: a pulled link re-derives as a link",
+              clipIsLink(kind: pulledLink.kind, text: pulledLink.text))
+        checkEqual("sync in: the link title lands", pulledLink.linkTitle, "Example")
+        var pulledImageRecord = wireRecord(kind: "image", text: nil)
+        pulledImageRecord.image = imageRef
+        let pulledImage = clipItem(from: pulledImageRecord)
+        check("sync in: a pulled image lands metadata-first",
+              pulledImage.imageFile == nil && pulledImage.remoteImageSHA256 == "aabb"
+                  && pulledImage.remoteImageKey == "users/u/images/ab/aabb.png")
+        var pulledFileRecord = wireRecord(kind: "file", text: nil)
+        pulledFileRecord.file = SyncFileRef(name: "report.pdf", size: 10, bytesSynced: false)
+        let pulledFile = clipItem(from: pulledFileRecord)
+        check("sync in: a pulled file keeps its name, not a path",
+              pulledFile.filePath == nil && pulledFile.remoteFileName == "report.pdf"
+                  && pulledFile.preview == "report.pdf")
+        let pulledStamp = clipItem(from: wireRecord())
+        check("sync in: updatedAt + origin land from the wire",
+              pulledStamp.updatedAt == 500 && pulledStamp.originDevice == "dev-b")
+
+        // Round trip: a pinned, boarded text clip survives.
+        let roundTripped = clipItem(from: outRecord)
+        check("sync: round trip preserves the clip",
+              roundTripped.id == outClip.id && roundTripped.text == "hello"
+                  && roundTripped.pinned && roundTripped.board == "B"
+                  && roundTripped.createdAt == 400)
+        let colourBack = clipItem(from: colourRecord)
+        check("sync: colour round trip preserves kind + hex",
+              colourBack.kind == "color" && colourBack.text == "#FF8000")
+
+        // clipIsLink — the shared link test.
+        check("link: a bare URL is a link", clipIsLink(kind: "text", text: "https://example.com/x"))
+        check("link: a sentence containing a URL is not",
+              !clipIsLink(kind: "text", text: "see https://example.com/x today"))
+        check("link: plain text is not", !clipIsLink(kind: "text", text: "just words"))
+
+        // Acceptance (LWW + device-id tiebreak).
+        check("lww: a newer record is accepted",
+              syncAccepts(incomingUpdatedAt: 600, incomingDevice: "dev-a",
+                          localUpdatedAt: 500, localDevice: "dev-b"))
+        check("lww: an older record is rejected",
+              !syncAccepts(incomingUpdatedAt: 400, incomingDevice: "dev-a",
+                           localUpdatedAt: 500, localDevice: "dev-b"))
+        check("lww: on a tie the greater device id wins",
+              syncAccepts(incomingUpdatedAt: 500, incomingDevice: "dev-c",
+                          localUpdatedAt: 500, localDevice: "dev-b"))
+        check("lww: on a tie the lesser device id loses",
+              !syncAccepts(incomingUpdatedAt: 500, incomingDevice: "dev-a",
+                           localUpdatedAt: 500, localDevice: "dev-b"))
+        check("lww: the same device at the same instant is a no-op",
+              !syncAccepts(incomingUpdatedAt: 500, incomingDevice: "dev-b",
+                           localUpdatedAt: 500, localDevice: "dev-b"))
+
+        // Watermark: only a fully-applied page advances it.
+        checkEqual("watermark: a full page advances to its last rev",
+                   syncAdvancedWatermark(current: 5, pageLastRev: 9, fullyApplied: true), 9)
+        checkEqual("watermark: a partial page does not advance",
+                   syncAdvancedWatermark(current: 5, pageLastRev: 9, fullyApplied: false), 5)
+        checkEqual("watermark: never regresses",
+                   syncAdvancedWatermark(current: 9, pageLastRev: 5, fullyApplied: true), 9)
+
+        // Batching at the API's 100-clip cap.
+        let ids250 = (0..<250).map { "id-\($0)" }
+        let batches = syncBatches(ids250)
+        checkEqual("batch: 250 ids make 3 batches", batches.count, 3)
+        checkEqual("batch: sizes are 100, 100, 50", batches.map { $0.count }, [100, 100, 50])
+        check("batch: order is preserved end to end",
+              batches.first?.first == "id-0" && batches.last?.last == "id-249")
+        check("batch: empty input makes no batches", syncBatches([String]()).isEmpty)
+        checkEqual("batch: exactly 100 makes one batch", syncBatches(Array(0..<100)).count, 1)
+
+        // Per-account state: the persisted record round-trips.
+        var acct = SyncAccountState(subject: "user-1")
+        acct.watermark = 42
+        acct.outbox = ["a", "b"]
+        acct.ackedTombstones = ["gone": 123.0]
+        acct.firstSyncDone = true
+        acct.lastSyncAt = 999
+        let acctData = try! JSONEncoder().encode(acct)
+        let acctBack = try! JSONDecoder().decode(SyncAccountState.self, from: acctData)
+        check("sync state: subject, watermark + outbox survive",
+              acctBack.subject == "user-1" && acctBack.watermark == 42 && acctBack.outbox == ["a", "b"])
+        check("sync state: acked tombstones + flags survive",
+              acctBack.ackedTombstones == ["gone": 123.0] && acctBack.firstSyncDone
+                  && acctBack.lastSyncAt == 999)
+
         // Bytes whose standard base64 spelling uses +, / and =.
         let tricky = Data([0xfb, 0xff, 0xfe, 0x00, 0x01])
         let encodedB64 = base64URLEncode(tricky)

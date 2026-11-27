@@ -40,6 +40,16 @@ struct ClipItem: Codable {
     var updatedAt: Double? = nil      // last change; nil = createdAt
     var originDevice: String? = nil   // device that created the clip
     var originPlatform: String? = nil // "mac" for clips born here
+    // Added for the sync engine — optional for the same reason.
+    // A pulled image clip's bytes arrive lazily: until they do,
+    // these carry the cloud identity of the image (its SHA-256
+    // and object key) so the card can ask for them on display.
+    var remoteImageSHA256: String? = nil
+    var remoteImageKey: String? = nil
+    // A pulled file clip's name: the bytes stay on the device
+    // that copied the file (v1 syncs file metadata only), so
+    // there is no local path — but the card can still name it.
+    var remoteFileName: String? = nil
 
     var effectiveUpdatedAt: Double { updatedAt ?? createdAt }
 
@@ -55,7 +65,7 @@ struct ClipItem: Codable {
     var preview: String {
         switch kind {
         case "image": return "Image"
-        case "file": return filePath.map { ($0 as NSString).lastPathComponent } ?? "File"
+        case "file": return filePath.map { ($0 as NSString).lastPathComponent } ?? remoteFileName ?? "File"
         case "color": return text ?? "Colour"
         default:
             let t = (text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -279,6 +289,22 @@ final class ClipStore {
         recordTombstone(item)
         deleteImageFile(of: item)
         items.removeAll { $0.id == item.id }
+    }
+
+    // A deletion learned from sync: the tombstone keeps the
+    // origin device's deletion time rather than stamping now,
+    // so last-writer-wins compares the same instant on every
+    // device. The clip leaves the live list and its local
+    // image file goes away, exactly as for a local delete.
+    // The caller passes the incoming clip itself — its
+    // updatedAt already IS the deletion time.
+    func applyRemoteDeletion(_ tombstone: ClipItem) {
+        tombstones.removeAll { $0.id == tombstone.id }
+        tombstones.insert(tombstone, at: 0)
+        if let local = items.first(where: { $0.id == tombstone.id }) {
+            deleteImageFile(of: local)
+        }
+        items.removeAll { $0.id == tombstone.id }
     }
 
     func clearHistory() {
@@ -1613,17 +1639,40 @@ final class AuthManager: NSObject, ASWebAuthenticationPresentationContextProvidi
         guard AuthConfig.isConfigured, let current = session,
               current.needsRefresh(at: Date().timeIntervalSince1970),
               !current.refreshToken.isEmpty else { return }
+        validIDToken(forceRefresh: true) { _ in }
+    }
+
+    // A usable ID token, for the sync engine's API calls:
+    // the stored token while it is fresh, a refreshed one
+    // otherwise — or forced, after the API answered 401.
+    // The completion runs on the main queue. A refused
+    // refresh ends the session exactly as refreshIfNeeded
+    // always has (Keychain cleared, signed out quietly,
+    // never a modal); any other failure also completes nil,
+    // and the caller decides whether it was expiry or
+    // weather.
+    func validIDToken(forceRefresh: Bool, completion: @escaping (String?) -> Void) {
+        guard let current = session else { completion(nil); return }
+        if !forceRefresh, !current.needsRefresh(at: Date().timeIntervalSince1970) {
+            completion(current.idToken)
+            return
+        }
+        guard AuthConfig.isConfigured, !current.refreshToken.isEmpty else {
+            completion(nil)
+            return
+        }
         performTokenRequest(form: [
             "grant_type": "refresh_token",
             "client_id": AuthConfig.clientID,
             "refresh_token": current.refreshToken
         ]) { [weak self] newSession in
             if let newSession {
-                self?.state = .signedIn(newSession.identity)
+                completion(newSession.idToken)
             } else {
                 self?.session = nil
                 AuthKeychain.clear()
                 self?.state = .signedOut
+                completion(nil)
             }
         }
     }
@@ -1854,6 +1903,807 @@ final class AuthManager: NSObject, ASWebAuthenticationPresentationContextProvidi
     }
 }
 
+// MARK: - Sync engine (ClipKeep Cloud)
+//
+// The Mac half of the deployed sync API (SYNC-ENGINE-DESIGN.md):
+// push/pull against the API Gateway base below, every call
+// carrying the Cognito ID token. Ordering never trusts this
+// Mac's clock for sequence — the server assigns a per-user
+// rev to every accepted write, and the pull watermark below
+// is that rev. Within one clip, last-writer-wins runs on
+// updatedAt, the server enforcing it with a conditional
+// write and this engine mirroring the same rule when a pull
+// lands, so the two never fight.
+//
+// The pure pieces (the wire mapping both directions, the
+// acceptance rule, watermark advancement, batching) are free
+// functions so tests.swift can pin them; SyncEngine itself
+// is transport + state and is only ever driven from
+// AppController, on the main queue.
+
+struct SyncImageRef: Codable, Equatable {
+    var file: String        // the cloud object key
+    var sha256: String
+    var width: Int?
+    var height: Int?
+}
+
+struct SyncFileRef: Codable, Equatable {
+    var name: String
+    var size: Int
+    var bytesSynced: Bool
+}
+
+struct SyncOrigin: Codable, Equatable {
+    var deviceId: String
+    var platform: String
+}
+
+// The on-the-wire clip (backend ClipRecord, schema 1), plus
+// the two server-stamped fields a pull carries back. Clients
+// never set rev/serverUpdatedAt — they stay nil on the way
+// out, and the synthesized encoder omits nil keys.
+struct SyncClipRecord: Codable, Equatable {
+    var schema: Int
+    var id: String
+    var kind: String        // "text", "link", "image", "file", "color"
+    var text: String?
+    var linkTitle: String?
+    var image: SyncImageRef?
+    var ocrText: String?
+    var file: SyncFileRef?
+    var sourceApp: String?
+    var sourceId: String?
+    var createdAt: Double
+    var updatedAt: Double
+    var pinned: Bool
+    var board: String?
+    var origin: SyncOrigin
+    var deleted: Bool
+    var rev: Int?
+    var serverUpdatedAt: Double?
+}
+
+struct SyncPullResponse: Codable {
+    var items: [SyncClipRecord]
+    var currentRev: Int
+    var nextSinceRev: Int
+    var hasMore: Bool
+}
+
+struct SyncPushRequest: Codable {
+    var clips: [SyncClipRecord]
+}
+
+struct SyncPushResult: Codable {
+    var id: String
+    var rev: Int
+    var applied: Bool
+    var current: SyncClipRecord?   // the winning stored version, when applied == false
+}
+
+struct SyncPushResponse: Codable {
+    var currentRev: Int
+    var results: [SyncPushResult]
+}
+
+struct SyncPresignResponse: Codable {
+    var exists: Bool
+    var key: String
+    var uploadUrl: String?
+    var downloadUrl: String?
+    var expiresIn: Int?
+}
+
+// The engine's per-account record, persisted as JSON in
+// UserDefaults. Keyed by the Cognito sub: a different
+// account never inherits a watermark or an outbox — the
+// engine starts it fresh (workingAccount(for:)).
+struct SyncAccountState: Codable {
+    var subject: String
+    var watermark: Int = 0              // last fully-applied pull rev
+    var outbox: [String] = []           // clip ids awaiting push, oldest first
+    var ackedTombstones: [String: Double] = [:]   // id → deletion time the server has
+    var firstSyncDone: Bool = false
+    var lastSyncAt: Double? = nil
+}
+
+// The link test, shared by AppController.isLinkItem and the
+// wire mapping: a text clip whose whole trimmed text is one
+// http/https URL. "link" is not a stored kind on the Mac —
+// it is derived here, and made explicit only on the wire.
+func clipIsLink(kind: String, text: String?) -> Bool {
+    guard kind == "text", let raw = text else { return false }
+    let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !t.contains(" "), !t.contains("\n"),
+          let url = URL(string: t), let scheme = url.scheme?.lowercased(),
+          scheme == "http" || scheme == "https", url.host != nil else { return false }
+    return true
+}
+
+// Local clip → wire record. The image ref is precomputed by
+// the caller (it needs file bytes and a presign round trip);
+// fileSize likewise (the file's on-disk size, when readable).
+// deleted marks the record as a tombstone push.
+func syncRecord(from item: ClipItem, image: SyncImageRef?, fileSize: Int?,
+                deviceID: String, deleted: Bool) -> SyncClipRecord {
+    var file: SyncFileRef?
+    if item.kind == "file" {
+        file = SyncFileRef(
+            name: item.filePath.map { ($0 as NSString).lastPathComponent } ?? item.remoteFileName ?? "File",
+            size: fileSize ?? 0,
+            bytesSynced: false)
+    }
+    return SyncClipRecord(
+        schema: 1,
+        id: item.id,
+        kind: clipIsLink(kind: item.kind, text: item.text) ? "link" : item.kind,
+        text: item.text,
+        linkTitle: item.linkTitle,
+        image: item.kind == "image" ? image : nil,
+        ocrText: item.ocrText,
+        file: file,
+        sourceApp: item.sourceApp,
+        sourceId: item.sourceBundleID,
+        createdAt: item.createdAt,
+        updatedAt: item.effectiveUpdatedAt,
+        pinned: item.pinned,
+        board: item.board,
+        origin: SyncOrigin(deviceId: item.originDevice ?? deviceID,
+                           platform: item.originPlatform ?? "mac"),
+        deleted: deleted,
+        rev: nil,
+        serverUpdatedAt: nil)
+}
+
+// Wire record → local clip. Image bytes and file bytes are
+// NOT here: a pulled image clip lands metadata-first (its
+// cloud sha/key ride along for the lazy fetch), and a pulled
+// file clip keeps only its name — v1 never moves file bytes.
+func clipItem(from record: SyncClipRecord) -> ClipItem {
+    var item = ClipItem(id: record.id,
+                        kind: record.kind == "link" ? "text" : record.kind,
+                        text: record.text, imageFile: nil,
+                        createdAt: record.createdAt, pinned: record.pinned,
+                        filePath: nil, sourceApp: record.sourceApp,
+                        sourceBundleID: record.sourceId,
+                        ocrText: record.ocrText, board: record.board,
+                        contentHash: nil)
+    item.linkTitle = record.linkTitle
+    item.updatedAt = record.updatedAt
+    item.originDevice = record.origin.deviceId
+    item.originPlatform = record.origin.platform
+    item.remoteImageSHA256 = record.image?.sha256
+    item.remoteImageKey = record.image?.file
+    item.remoteFileName = record.file?.name
+    return item
+}
+
+// The acceptance rule for a pulled record, mirroring the
+// server's push condition (updatedAt <= incoming applies):
+// a strictly newer record wins; an older one loses; on an
+// exact tie the origin device id decides — the
+// lexicographically greater id wins — so two devices
+// holding the same clip at the same instant converge on
+// the same copy instead of flip-flopping.
+func syncAccepts(incomingUpdatedAt: Double, incomingDevice: String,
+                 localUpdatedAt: Double, localDevice: String) -> Bool {
+    if incomingUpdatedAt != localUpdatedAt { return incomingUpdatedAt > localUpdatedAt }
+    return incomingDevice > localDevice
+}
+
+// The watermark moves ONLY when a pull page was applied in
+// full — a half-applied page must be re-fetched, not
+// skipped — and it never moves backwards.
+func syncAdvancedWatermark(current: Int, pageLastRev: Int, fullyApplied: Bool) -> Int {
+    fullyApplied ? max(current, pageLastRev) : current
+}
+
+// Split the outbox into push batches (the API caps a push
+// at 100 clips), oldest first, order preserved.
+func syncBatches<T>(_ items: [T], limit: Int = 100) -> [[T]] {
+    guard limit > 0, !items.isEmpty else { return [] }
+    var batches: [[T]] = []
+    var index = 0
+    while index < items.count {
+        batches.append(Array(items[index ..< min(index + limit, items.count)]))
+        index += limit
+    }
+    return batches
+}
+
+func syncContentType(forExt ext: String) -> String {
+    switch ext.lowercased() {
+    case "jpg", "jpeg": return "image/jpeg"
+    case "gif": return "image/gif"
+    case "webp": return "image/webp"
+    case "heic": return "image/heic"
+    case "tiff": return "image/tiff"
+    default: return "image/png"
+    }
+}
+
+final class SyncEngine {
+    enum State: Equatable {
+        case idle            // up to date (or never run)
+        case syncing
+        case offline         // the last attempt got no usable answer
+        case signInExpired   // 401 even after one forced refresh
+    }
+
+    private(set) var state: State = .idle {
+        didSet { if state != oldValue { onStateChange?() } }
+    }
+    // Mirrors AuthManager's wiring: AppController refreshes
+    // the Sync view + Settings Account tab on every change.
+    var onStateChange: (() -> Void)?
+    weak var app: AppController?
+
+    private var running = false
+    private var followUpNeeded = false
+    private var debounceWork: DispatchWorkItem?
+    private var imageFetchesInFlight: Set<String> = []
+    // Clips whose bytes the cloud answered exists:false for —
+    // a normal state (the origin device hasn't uploaded, or
+    // the object is gone), not an error; don't ask again
+    // this launch.
+    private var imageFetchMisses: Set<String> = []
+
+    static let apiBase = "https://ajiilxo2e6.execute-api.us-east-1.amazonaws.com"
+    private static let stateKey = "ClipKeepSyncStateV1"
+
+    // MARK: Persisted per-account state
+
+    private func storedAccount() -> SyncAccountState {
+        if let data = UserDefaults.standard.data(forKey: Self.stateKey),
+           let decoded = try? JSONDecoder().decode(SyncAccountState.self, from: data) {
+            return decoded
+        }
+        return SyncAccountState(subject: "")
+    }
+
+    private func saveStoredAccount(_ acct: SyncAccountState) {
+        if let data = try? JSONEncoder().encode(acct) {
+            UserDefaults.standard.set(data, forKey: Self.stateKey)
+        }
+    }
+
+    // The record a cycle works on: the stored one when it
+    // belongs to this account, a fresh one otherwise.
+    private func workingAccount(for subject: String) -> SyncAccountState {
+        let stored = storedAccount()
+        return stored.subject == subject ? stored : SyncAccountState(subject: subject)
+    }
+
+    // The last completed sync for the CURRENTLY signed-in
+    // account (nil for any other account, or never).
+    var displayLastSyncAt: Double? {
+        guard let subject = app?.auth.session?.identity.subject else { return nil }
+        let stored = storedAccount()
+        return stored.subject == subject ? stored.lastSyncAt : nil
+    }
+
+    // MARK: Triggers
+
+    // A local mutation files its clip id in the outbox —
+    // unconditionally, signed in or not, sync on or not: the
+    // filing is a set insert, and the drain decides later.
+    // (Mutations made under a different account than the
+    // stored record's are still safe: a fresh account's
+    // first sync files the whole local history anyway.)
+    func enqueue(_ id: String) {
+        var acct = storedAccount()
+        if !acct.outbox.contains(id) {
+            acct.outbox.append(id)
+            saveStoredAccount(acct)
+        }
+        scheduleDebouncedSync()
+    }
+
+    private func scheduleDebouncedSync() {
+        debounceWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.syncNow() }
+        debounceWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: work)
+    }
+
+    // The panel opened: catch up if the last sync is stale.
+    func notePanelOpened() {
+        guard let last = displayLastSyncAt else { syncNow(); return }
+        if Date().timeIntervalSince1970 - last > 60 { syncNow() }
+    }
+
+    // One sync cycle, when there's anything to run it with.
+    // Signed out or sync off, the engine is inert — the app
+    // behaves exactly as it did before sync existed.
+    func syncNow() {
+        guard let app, app.syncEnabled, app.auth.session != nil else { return }
+        if running { followUpNeeded = true; return }
+        runCycle()
+    }
+
+    // MARK: One cycle — pull, then push
+
+    private func runCycle() {
+        guard let app, let session = app.auth.session else { return }
+        running = true
+        state = .syncing
+        let subject = session.identity.subject
+        // Persist the working record up front, so an account
+        // switch is durable even if this cycle dies early.
+        saveStoredAccount(workingAccount(for: subject))
+        pullPhase(subject: subject)
+    }
+
+    private func finishCycle(_ outcome: State, synced: Bool = false) {
+        if synced, let subject = app?.auth.session?.identity.subject {
+            var acct = workingAccount(for: subject)
+            acct.lastSyncAt = Date().timeIntervalSince1970
+            saveStoredAccount(acct)
+        }
+        running = false
+        state = outcome
+        if followUpNeeded {
+            followUpNeeded = false
+            if outcome == .idle || outcome == .offline { syncNow() }
+        }
+    }
+
+    private func pullPhase(subject: String) {
+        guard app != nil else { finishCycle(.offline); return }
+        let watermark = workingAccount(for: subject).watermark
+        guard let url = URL(string: "\(Self.apiBase)/sync/pull?sinceRev=\(watermark)") else {
+            finishCycle(.offline)
+            return
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        apiCall(request) { [weak self] data, status in
+            guard let self else { return }
+            if status == 401 { self.finishCycle(.signInExpired); return }
+            guard status == 200, let data,
+                  let page = try? JSONDecoder().decode(SyncPullResponse.self, from: data) else {
+                self.finishCycle(.offline)
+                return
+            }
+            self.applyPullPage(page, subject: subject)
+            if page.hasMore {
+                self.pullPhase(subject: subject)
+            } else {
+                self.pushPhase(subject: subject)
+            }
+        }
+    }
+
+    // Apply one pull page in rev order, then — and only
+    // then — advance the watermark to the page's end.
+    private func applyPullPage(_ page: SyncPullResponse, subject: String) {
+        guard let app else { return }
+        var acct = workingAccount(for: subject)
+        var changed = false
+        var insertedAny = false
+        for record in page.items {
+            if record.deleted {
+                // Already the server's state: acknowledge it
+                // locally so the push sweep never re-sends it.
+                acct.ackedTombstones[record.id] = record.updatedAt
+                if app.store.items.contains(where: { $0.id == record.id }) {
+                    app.store.applyRemoteDeletion(clipItem(from: record))
+                    changed = true
+                } else if let stone = app.store.tombstones.first(where: { $0.id == record.id }),
+                          record.updatedAt > stone.effectiveUpdatedAt {
+                    app.store.applyRemoteDeletion(clipItem(from: record))
+                }
+                continue
+            }
+            if let stone = app.store.tombstones.first(where: { $0.id == record.id }) {
+                // Deleted here; the incoming copy wins only
+                // if it is strictly newer than the deletion.
+                guard record.updatedAt > stone.effectiveUpdatedAt else {
+                    if !acct.outbox.contains(record.id) { acct.outbox.append(record.id) }
+                    continue
+                }
+                app.store.tombstones.removeAll { $0.id == record.id }
+                app.store.items.append(clipItem(from: record))
+                changed = true
+                insertedAny = true
+                continue
+            }
+            if let idx = app.store.items.firstIndex(where: { $0.id == record.id }) {
+                let local = app.store.items[idx]
+                if syncAccepts(incomingUpdatedAt: record.updatedAt, incomingDevice: record.origin.deviceId,
+                               localUpdatedAt: local.effectiveUpdatedAt, localDevice: local.originDevice ?? "") {
+                    var replacement = clipItem(from: record)
+                    // The same image already on disk: keep the
+                    // local file (and its dedupe hash) rather
+                    // than refetching identical bytes.
+                    if record.kind == "image", let localName = local.imageFile,
+                       local.remoteImageSHA256 == record.image?.sha256 {
+                        replacement.imageFile = localName
+                        replacement.contentHash = local.contentHash
+                    }
+                    app.store.items[idx] = replacement
+                    changed = true
+                } else if local.effectiveUpdatedAt > record.updatedAt {
+                    // Our copy is the newer one: queue it so
+                    // the server converges on it.
+                    if !acct.outbox.contains(record.id) { acct.outbox.append(record.id) }
+                }
+            } else {
+                app.store.items.append(clipItem(from: record))
+                changed = true
+                insertedAny = true
+            }
+        }
+        if insertedAny {
+            // Feed order: pinned first, then newest — the
+            // same comparator togglePin re-sorts with.
+            app.store.items.sort { a, b in
+                if a.pinned != b.pinned { return a.pinned && !b.pinned }
+                return a.createdAt > b.createdAt
+            }
+        }
+        acct.watermark = syncAdvancedWatermark(current: acct.watermark,
+                                               pageLastRev: page.nextSinceRev,
+                                               fullyApplied: true)
+        saveStoredAccount(acct)
+        if changed {
+            app.store.save()
+            app.refreshList()
+        }
+    }
+
+    private func pushPhase(subject: String) {
+        guard let app else { finishCycle(.offline); return }
+        var acct = workingAccount(for: subject)
+        // First sync for this account: everything local the
+        // server has never seen joins the outbox (the pull
+        // above already merged what the server DID have).
+        if !acct.firstSyncDone {
+            for item in app.store.items where !acct.outbox.contains(item.id) {
+                acct.outbox.append(item.id)
+            }
+            acct.firstSyncDone = true
+        }
+        // Tombstone sweep: deletions no enqueue could see
+        // (trims inside the store) still reach the server.
+        // Acknowledged tombstones are skipped by their
+        // deletion time, so a re-delete re-sends.
+        for stone in app.store.tombstones where acct.ackedTombstones[stone.id] != stone.effectiveUpdatedAt {
+            if !acct.outbox.contains(stone.id) { acct.outbox.append(stone.id) }
+        }
+        saveStoredAccount(acct)
+        guard let batch = syncBatches(acct.outbox).first, !batch.isEmpty else {
+            finishCycle(.idle, synced: true)
+            return
+        }
+        preparePushBatch(batch, subject: subject) { [weak self] records in
+            guard let self else { return }
+            guard !records.isEmpty else {
+                // Every clip in the batch was skipped (its
+                // image upload failed): leave the outbox
+                // untouched and stop — the next trigger
+                // retries.
+                self.finishCycle(.offline)
+                return
+            }
+            self.sendPushBatch(records, subject: subject)
+        }
+    }
+
+    // Build the wire records for one outbox batch. The
+    // outbox holds ids; the store decides what an id
+    // currently means — a live clip pushes its record, a
+    // tombstoned id pushes a delete, an id that is neither
+    // (purged past retention) is simply dropped.
+    private func preparePushBatch(_ ids: [String], subject: String,
+                                  completion: @escaping ([SyncClipRecord]) -> Void) {
+        guard let app else { completion([]); return }
+        var records: [SyncClipRecord] = []
+        var index = 0
+        func step() {
+            if index >= ids.count { completion(records); return }
+            let id = ids[index]
+            index += 1
+            if let item = app.store.items.first(where: { $0.id == id }) {
+                if item.kind == "image" {
+                    prepareImageRecord(item) { ref in
+                        if let ref {
+                            records.append(syncRecord(from: item, image: ref, fileSize: nil,
+                                                      deviceID: app.store.deviceID, deleted: false))
+                        }
+                        step()
+                    }
+                } else {
+                    var fileSize: Int?
+                    if item.kind == "file", let path = item.filePath,
+                       let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+                       let size = attrs[.size] as? NSNumber {
+                        fileSize = size.intValue
+                    }
+                    records.append(syncRecord(from: item, image: nil, fileSize: fileSize,
+                                              deviceID: app.store.deviceID, deleted: false))
+                    step()
+                }
+            } else if let stone = app.store.tombstones.first(where: { $0.id == id }) {
+                records.append(syncRecord(from: stone, image: nil, fileSize: nil,
+                                          deviceID: app.store.deviceID, deleted: true))
+                step()
+            } else {
+                var acct = workingAccount(for: subject)
+                acct.outbox.removeAll { $0 == id }
+                saveStoredAccount(acct)
+                step()
+            }
+        }
+        step()
+    }
+
+    private func sendPushBatch(_ records: [SyncClipRecord], subject: String) {
+        guard let url = URL(string: "\(Self.apiBase)/sync/push") else {
+            finishCycle(.offline)
+            return
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONEncoder().encode(SyncPushRequest(clips: records))
+        apiCall(request) { [weak self] data, status in
+            guard let self, let app = self.app else { return }
+            if status == 401 { self.finishCycle(.signInExpired); return }
+            guard status == 200, let data,
+                  let response = try? JSONDecoder().decode(SyncPushResponse.self, from: data) else {
+                self.finishCycle(.offline)
+                return
+            }
+            var acct = self.workingAccount(for: subject)
+            var adopted = false
+            for result in response.results {
+                acct.outbox.removeAll { $0 == result.id }
+                if let stone = app.store.tombstones.first(where: { $0.id == result.id }) {
+                    acct.ackedTombstones[result.id] = stone.effectiveUpdatedAt
+                }
+                if !result.applied, let current = result.current {
+                    // The server's stored version won: adopt
+                    // it wholesale, no local arbitration.
+                    self.adoptServerVersion(current)
+                    if current.deleted {
+                        acct.ackedTombstones[result.id] = current.updatedAt
+                    }
+                    adopted = true
+                }
+            }
+            self.saveStoredAccount(acct)
+            if adopted {
+                app.store.save()
+                app.refreshList()
+            }
+            if !acct.outbox.isEmpty, !response.results.isEmpty {
+                self.pushPhase(subject: subject)
+            } else if !acct.outbox.isEmpty {
+                // The server answered for none of the batch:
+                // stop rather than loop on it — the outbox
+                // keeps the ids and the next trigger retries.
+                self.finishCycle(.offline)
+            } else {
+                self.finishCycle(.idle, synced: true)
+            }
+        }
+    }
+
+    private func adoptServerVersion(_ record: SyncClipRecord) {
+        guard let app else { return }
+        if record.deleted {
+            app.store.applyRemoteDeletion(clipItem(from: record))
+            return
+        }
+        let incoming = clipItem(from: record)
+        if let idx = app.store.items.firstIndex(where: { $0.id == record.id }) {
+            var replacement = incoming
+            if record.kind == "image", let localName = app.store.items[idx].imageFile,
+               app.store.items[idx].remoteImageSHA256 == record.image?.sha256 {
+                replacement.imageFile = localName
+                replacement.contentHash = app.store.items[idx].contentHash
+            }
+            app.store.items[idx] = replacement
+        } else {
+            app.store.tombstones.removeAll { $0.id == record.id }
+            app.store.items.append(incoming)
+            app.store.items.sort { a, b in
+                if a.pinned != b.pinned { return a.pinned && !b.pinned }
+                return a.createdAt > b.createdAt
+            }
+        }
+    }
+
+    // MARK: Image bytes — upload on push, lazy download on display
+
+    // The wire ref for one image clip, uploading its bytes
+    // first when the cloud doesn't have them. Completes nil
+    // when the bytes can't be put in the cloud right now —
+    // the clip is skipped this cycle and stays in the outbox.
+    private func prepareImageRecord(_ item: ClipItem, completion: @escaping (SyncImageRef?) -> Void) {
+        guard let app else { completion(nil); return }
+        // Pulled clip, bytes never landed here, never edited
+        // since: the cloud already holds them under this key.
+        if item.imageFile == nil, let sha = item.remoteImageSHA256, let key = item.remoteImageKey {
+            completion(SyncImageRef(file: key, sha256: sha, width: nil, height: nil))
+            return
+        }
+        guard let fileURL = app.store.imageURL(for: item) else { completion(nil); return }
+        DispatchQueue.global(qos: .utility).async {
+            let data = try? Data(contentsOf: fileURL)
+            DispatchQueue.main.async {
+                guard let data else { completion(nil); return }
+                let sha = sha256Hex(data)
+                let ext = ((item.imageFile ?? "") as NSString).pathExtension.lowercased()
+                let extOrPNG = ext.isEmpty ? "png" : ext
+                var dims: (Int, Int)?
+                if let name = item.imageFile, let size = app.imageDimensions(forFile: name) {
+                    dims = (Int(size.width), Int(size.height))
+                }
+                if item.remoteImageSHA256 == sha, let key = item.remoteImageKey {
+                    completion(SyncImageRef(file: key, sha256: sha, width: dims?.0, height: dims?.1))
+                    return
+                }
+                self.presign(sha256: sha, ext: extOrPNG, action: nil) { [weak self] response in
+                    guard let self, let response else { completion(nil); return }
+                    if response.exists {
+                        self.noteImageUploaded(itemID: item.id, sha256: sha, key: response.key)
+                        completion(SyncImageRef(file: response.key, sha256: sha, width: dims?.0, height: dims?.1))
+                    } else if let uploadUrl = response.uploadUrl {
+                        self.uploadBytes(data, to: uploadUrl, contentType: syncContentType(forExt: extOrPNG)) { [weak self] ok in
+                            guard let self else { completion(nil); return }
+                            if ok {
+                                self.noteImageUploaded(itemID: item.id, sha256: sha, key: response.key)
+                                completion(SyncImageRef(file: response.key, sha256: sha, width: dims?.0, height: dims?.1))
+                            } else {
+                                completion(nil)
+                            }
+                        }
+                    } else {
+                        completion(nil)
+                    }
+                }
+            }
+        }
+    }
+
+    // Remember that a clip's bytes are in the cloud, so the
+    // next push of the same clip skips the upload. Not a
+    // mutation for LWW purposes — updatedAt stays put.
+    private func noteImageUploaded(itemID: String, sha256: String, key: String) {
+        guard let app, let idx = app.store.items.firstIndex(where: { $0.id == itemID }) else { return }
+        app.store.items[idx].remoteImageSHA256 = sha256
+        app.store.items[idx].remoteImageKey = key
+        app.store.save()
+    }
+
+    // Lazy download: a pulled image clip's card asks for its
+    // bytes the first time it renders without them. They land
+    // in the images folder under their hash (identical images
+    // share one file), the thumbnail cache picks them up on
+    // the next rebuild, and the clip's local dedupe hash is
+    // stamped so a re-copy of the same image dedupes as usual.
+    func fetchImageIfNeeded(_ item: ClipItem) {
+        guard let app, app.syncEnabled, app.auth.session != nil,
+              item.kind == "image",
+              let sha = item.remoteImageSHA256,
+              !imageFetchesInFlight.contains(item.id),
+              !imageFetchMisses.contains(item.id) else { return }
+        if let name = item.imageFile,
+           FileManager.default.fileExists(atPath: app.store.imagesDir.appendingPathComponent(name).path) {
+            return
+        }
+        imageFetchesInFlight.insert(item.id)
+        let ext = item.remoteImageKey.map { ($0 as NSString).pathExtension.lowercased() } ?? ""
+        presign(sha256: sha, ext: ext.isEmpty ? "png" : ext, action: "download") { [weak self] response in
+            guard let self else { return }
+            guard let response, response.exists, let downloadUrl = response.downloadUrl,
+                  let url = URL(string: downloadUrl) else {
+                self.imageFetchesInFlight.remove(item.id)
+                self.imageFetchMisses.insert(item.id)
+                return
+            }
+            URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.imageFetchesInFlight.remove(item.id)
+                    guard let data, let app = self.app,
+                          let idx = app.store.items.firstIndex(where: { $0.id == item.id }) else { return }
+                    let name = "\(sha).\(ext.isEmpty ? "png" : ext)"
+                    let fileURL = app.store.imagesDir.appendingPathComponent(name)
+                    if !FileManager.default.fileExists(atPath: fileURL.path) {
+                        try? data.write(to: fileURL)
+                    }
+                    app.store.items[idx].imageFile = name
+                    app.store.items[idx].contentHash = fnvHash(data)
+                    app.store.save()
+                    app.refreshList()
+                }
+            }.resume()
+        }
+    }
+
+    // MARK: Transport
+
+    // One API call with the current ID token. On 401,
+    // exactly one forced refresh and one retry; a second
+    // 401 surfaces as-is and the caller reads it as an
+    // expired sign-in. statusCode 0 = no answer at all.
+    // Completions run on the main queue.
+    private func apiCall(_ request: URLRequest, completion: @escaping (Data?, Int) -> Void) {
+        guard let app else { completion(nil, 0); return }
+        app.auth.validIDToken(forceRefresh: false) { [weak self] token in
+            guard let self, let token else { completion(nil, 401); return }
+            self.attempt(request, token: token, isRetry: false, completion: completion)
+        }
+    }
+
+    private func attempt(_ request: URLRequest, token: String, isRetry: Bool,
+                         completion: @escaping (Data?, Int) -> Void) {
+        var request = request
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, _ in
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            DispatchQueue.main.async {
+                guard let self else { completion(nil, 0); return }
+                if status == 401, !isRetry {
+                    self.app?.auth.validIDToken(forceRefresh: true) { [weak self] fresh in
+                        guard let self, let fresh else { completion(nil, 401); return }
+                        self.attempt(request, token: fresh, isRetry: true, completion: completion)
+                    }
+                } else {
+                    completion(data, status)
+                }
+            }
+        }.resume()
+    }
+
+    // The presign endpoint, both directions: upload (the
+    // default — mint a PUT URL, or learn the object already
+    // exists) and download (action: "download" — mint a GET
+    // URL for the caller's own copy). Nil = the call failed.
+    private func presign(sha256: String, ext: String, action: String?,
+                         completion: @escaping (SyncPresignResponse?) -> Void) {
+        guard let url = URL(string: "\(Self.apiBase)/uploads/presign") else {
+            completion(nil)
+            return
+        }
+        var body: [String: Any] = ["sha256": sha256]
+        if !ext.isEmpty { body["ext"] = ext }
+        if let action {
+            body["action"] = action
+        } else {
+            body["contentType"] = syncContentType(forExt: ext)
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        apiCall(request) { data, status in
+            guard status == 200, let data,
+                  let response = try? JSONDecoder().decode(SyncPresignResponse.self, from: data) else {
+                completion(nil)
+                return
+            }
+            completion(response)
+        }
+    }
+
+    private func uploadBytes(_ data: Data, to urlString: String, contentType: String,
+                             completion: @escaping (Bool) -> Void) {
+        guard let url = URL(string: urlString) else { completion(false); return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+        request.setValue(contentType, forHTTPHeaderField: "Content-Type")
+        URLSession.shared.uploadTask(with: request, from: data) { _, response, _ in
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            DispatchQueue.main.async { completion(status == 200) }
+        }.resume()
+    }
+}
+
 // MARK: - App
 
 // Borderless panel window (v2.10.0): a .borderless NSWindow
@@ -1926,10 +2776,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     // Account + sync (v2.18.0): one AuthManager serves the
     // panel's Sync view and the Settings Account tab alike.
     // The sync toggle persists as ClipKeepSyncEnabled
-    // (default off); the engine itself arrives with ClipKeep
-    // Cloud — in this skeleton the toggle only records the
-    // user's intent, and the UI says so.
+    // (default off). The SyncEngine beside it runs the
+    // actual push/pull; it stays inert until the user is
+    // signed in with the toggle on.
     let auth = AuthManager()
+    let syncEngine = SyncEngine()
     var syncEnabled: Bool {
         get { UserDefaults.standard.bool(forKey: "ClipKeepSyncEnabled") }
         set { UserDefaults.standard.set(newValue, forKey: "ClipKeepSyncEnabled") }
@@ -2063,9 +2914,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             if !wasSignedIn, isSignedIn, panel != nil, panel.isVisible {
                 setSyncView(open: true)
             }
+            // A completed sign-in kicks the engine (it
+            // no-ops unless sync is on).
+            if !wasSignedIn, isSignedIn { syncEngine.syncNow() }
         }
         auth.onNotConfigured = { [weak self] in self?.showAccountsNotLiveAlert() }
         auth.onDeleteUnavailable = { [weak self] in self?.showDeleteUnavailableAlert() }
+        syncEngine.app = self
+        syncEngine.onStateChange = { [weak self] in
+            self?.refreshSyncView()
+            self?.refreshSettingsAccount()
+        }
         refreshSyncView()
         auth.refreshIfNeeded()
         checkForUpdate()
@@ -2164,6 +3023,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                                    sourceApp: sourceName, sourceBundleID: sourceBundle,
                                    ocrText: nil, board: nil, contentHash: nil)
             store.insert(newItem)
+            noteSyncMutation(newItem.id)
             refreshList()
             noteCapture(newItem)
             return
@@ -2185,13 +3045,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                                        sourceApp: sourceName, sourceBundleID: sourceBundle,
                                        ocrText: nil, board: nil, contentHash: hash)
                 store.insert(newItem)
+                noteSyncMutation(newItem.id)
                 refreshList()
                 noteCapture(newItem)
                 recognizeText(in: png) { [weak self] text in
                     guard let self, let text,
                           let idx = self.store.items.firstIndex(where: { $0.id == id }) else { return }
                     self.store.items[idx].ocrText = text
+                    // OCR arrival is a mutation like any
+                    // other: stamp it, so sync's
+                    // last-writer-wins ordering sees it.
+                    self.store.touch(id: id)
                     self.store.save()
+                    self.noteSyncMutation(id)
                     self.refreshList()
                 }
             }
@@ -2209,6 +3075,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                                    sourceApp: sourceName, sourceBundleID: sourceBundle,
                                    ocrText: nil, board: nil, contentHash: nil)
             store.insert(newItem)
+            noteSyncMutation(newItem.id)
             refreshList()
             noteCapture(newItem)
             return
@@ -2226,6 +3093,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                                        sourceApp: sourceName, sourceBundleID: sourceBundle,
                                        ocrText: nil, board: nil, contentHash: nil)
                 store.insert(newItem)
+                noteSyncMutation(newItem.id)
                 refreshList()
                 noteCapture(newItem)
                 return
@@ -2236,10 +3104,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                                    sourceApp: sourceName, sourceBundleID: sourceBundle,
                                    ocrText: nil, board: nil, contentHash: nil)
             store.insert(newItem)
+            noteSyncMutation(newItem.id)
             refreshList()
             enrichLinkIfNeeded(newItem)
             noteCapture(newItem)
         }
+    }
+
+    // Every local mutation files its clip id with the sync
+    // engine's outbox. The filing is unconditional (the
+    // engine drains it only when signed in with sync on);
+    // deletes file the id too — at drain time the store's
+    // tombstone for it is what gets pushed.
+    func noteSyncMutation(_ id: String) {
+        syncEngine.enqueue(id)
     }
 
     // Style D on the capture path (v2.14.0): a clip captured
@@ -2724,7 +3602,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
                 if !cleaned.isEmpty { self.store.items[idx].linkTitle = cleaned }
             }
             if let imageFile { self.store.items[idx].linkImageFile = imageFile }
+            // The fetched title rides the wire: stamp the
+            // change and file it with the sync outbox.
+            self.store.touch(id: id)
             self.store.save()
+            self.noteSyncMutation(id)
             self.refreshList()
         }
     }
@@ -3260,6 +4142,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             store.items[idx].linkChecked = nil
         }
         store.save()
+        noteSyncMutation(id)
         refreshList()
         if let updated = store.items.first(where: { $0.id == id }) { enrichLinkIfNeeded(updated) }
         previewWindow?.orderOut(nil)
@@ -3380,7 +4263,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         refreshList()
     }
     @objc func menuDelete(_ sender: NSMenuItem) {
-        if let f = item(for: sender) { store.remove(f); store.save() }
+        if let f = item(for: sender) { store.remove(f); store.save(); noteSyncMutation(f.id) }
         refreshList()
     }
 
@@ -3393,6 +4276,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             return a.createdAt > b.createdAt
         }
         store.save()
+        noteSyncMutation(id)
         refreshList()
     }
 
@@ -4738,22 +5622,43 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         syncSignedInView.isHidden = identity == nil
         syncSignedOutView.isHidden = identity != nil
 
-        // Hero states for the skeleton: live sync doesn't
-        // exist yet, so the detail line says when it arrives
-        // instead of inventing a last-sync time.
+        // Hero states: auth errors first, then — signed in
+        // with sync on — the engine's own state, with the
+        // last-synced time in the detail line.
         let status: String
         let glyph: String
         let tint: NSColor
         var detail = "Sync launches with ClipKeep Cloud"
+        var syncNowEnabled = false
         if case .error(let message) = auth.state {
             status = "Error"
             detail = message
             glyph = "exclamationmark.triangle.fill"
             tint = .systemOrange
         } else if identity != nil && syncEnabled {
-            status = "Signed in"
-            glyph = "checkmark"
-            tint = .systemGreen
+            switch syncEngine.state {
+            case .syncing:
+                status = "Syncing…"
+                detail = "Talking to ClipKeep Cloud"
+                glyph = "arrow.triangle.2.circlepath"
+                tint = .systemBlue
+            case .offline:
+                status = "Offline"
+                detail = lastSyncDetail(prefix: "Will retry when you're back online")
+                glyph = "wifi.slash"
+                tint = .systemOrange
+            case .signInExpired:
+                status = "Sign-in expired"
+                detail = "Sign in again to resume sync"
+                glyph = "exclamationmark.triangle.fill"
+                tint = .systemOrange
+            case .idle:
+                status = "Up to date"
+                detail = lastSyncDetail(prefix: nil)
+                glyph = "checkmark"
+                tint = .systemGreen
+            }
+            syncNowEnabled = syncEngine.state != .syncing
         } else {
             status = "Sync off"
             glyph = "pause.fill"
@@ -4765,9 +5670,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         heroGlyphView.contentTintColor = tint
         heroRingView.layer?.borderColor = tint.cgColor
         heroToggle.state = syncEnabled ? .on : .off
-        // Sync Now stays disabled until the engine exists —
-        // an enabled button that does nothing would be a lie.
-        heroSyncNowButton.isEnabled = false
+        heroSyncNowButton.isEnabled = syncNowEnabled
 
         // The Devices card dot mirrors the avatar dot's
         // state (v2.18.1) — painted once at build, it read
@@ -4935,9 +5838,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         sender.state = syncEnabled ? .on : .off
     }
 
+    // The last-synced line for the Sync view + Settings,
+    // from the engine's per-account record.
+    func lastSyncDetail(prefix: String?) -> String {
+        guard let last = syncEngine.displayLastSyncAt else {
+            return prefix ?? "Not synced yet on this Mac"
+        }
+        let when = relativeTimeString(last)
+        return prefix.map { "\($0) · Last synced \(when)" } ?? "Last synced \(when)"
+    }
+
     @objc func syncNowClicked() {
-        // Disabled in the skeleton (see refreshSyncView) —
-        // the engine wires this when ClipKeep Cloud lands.
+        syncEngine.syncNow()
     }
 
     // Turning sync on while signed out prompts sign-in: the
@@ -4958,6 +5870,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             return
         }
         syncEnabled = on
+        if on { syncEngine.syncNow() }
         refreshSyncView()
         refreshSettingsAccount()
     }
@@ -5469,12 +6382,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     }
 
     func isLinkItem(_ item: ClipItem) -> Bool {
-        guard item.kind == "text", let raw = item.text else { return false }
-        let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.contains(" "), !t.contains("\n"),
-              let url = URL(string: t), let scheme = url.scheme?.lowercased(),
-              scheme == "http" || scheme == "https", url.host != nil else { return false }
-        return true
+        clipIsLink(kind: item.kind, text: item.text)
     }
 
     func bandColor(for item: ClipItem) -> NSColor {
@@ -5818,6 +6726,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             let iv = NSImageView()
             if let name = item.imageFile, let img = cardThumbnail(forFile: name) {
                 iv.image = img
+            }
+            // A pulled image clip whose bytes aren't local
+            // yet renders as the empty tile above; rendering
+            // it is what asks the engine to fetch them.
+            if item.imageFile == nil {
+                syncEngine.fetchImageIfNeeded(item)
             }
             iv.imageScaling = .scaleProportionallyUpOrDown
             iv.wantsLayer = true
@@ -6167,6 +7081,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         store.items[idx].board = sender.representedObject as? String
         store.touch(id: found.id)
         store.save()
+        noteSyncMutation(found.id)
         refreshList()
     }
 
@@ -6191,6 +7106,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             store.items[idx].board = name
             store.touch(id: found.id)
             store.save()
+            noteSyncMutation(found.id)
         }
         refreshList()
     }
@@ -6216,6 +7132,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         guard let found = item(for: sender) else { return }
         store.remove(found)
         store.save()
+        noteSyncMutation(found.id)
         refreshList()
     }
 
@@ -6232,6 +7149,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         if panel.isVisible { panel.makeKeyAndOrderFront(nil) }
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         store.clearHistory()
+        // The clear tombstoned everything it removed: file
+        // them all with the outbox so the deletions sync.
+        for stone in store.tombstones { noteSyncMutation(stone.id) }
         refreshList()
     }
 
@@ -7010,7 +7930,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     func syncStatusText() -> String {
         if case .error(let message) = auth.state { return "Error — \(message)" }
         guard auth.session != nil else { return "Not signed in" }
-        return syncEnabled ? "Signed in — sync launches with ClipKeep Cloud" : "Signed in — sync off"
+        guard syncEnabled else { return "Signed in — sync off" }
+        switch syncEngine.state {
+        case .syncing: return "Syncing…"
+        case .offline: return "Offline — will retry"
+        case .signInExpired: return "Sign-in expired — sign in again to resume sync"
+        case .idle:
+            if let last = syncEngine.displayLastSyncAt {
+                return "Up to date — last synced \(relativeTimeString(last))"
+            }
+            return "Signed in — not synced yet"
+        }
     }
 
     @objc func settingsSyncToggled(_ sender: NSButton) {
@@ -7084,6 +8014,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     @objc func purgeOlderClips() {
         let days = store.retentionDays
         let removed = store.purgePastRetention()
+        if removed > 0 {
+            for stone in store.tombstones { noteSyncMutation(stone.id) }
+        }
         refreshList()
         syncSettingsControls()
         // The readout reports the outcome, so the click never
@@ -7217,6 +8150,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             // monitor, and ⌘F focuses the field explicitly.
             panel.makeFirstResponder(scrollView)
             playIntroIfNeeded()
+            // Opening the panel is a sync trigger when the
+            // last cycle is stale (the engine decides).
+            syncEngine.notePanelOpened()
         }
     }
 
