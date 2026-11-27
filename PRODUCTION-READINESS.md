@@ -23,7 +23,11 @@ plus the ROADMAP.
    end-to-end tested (Nov 25), but the app does not sync yet; cloud
    storage is provisioned and empty. Build against pool
    us-east-1_JvBBixLP9 / the deployed API; LWW on server revs,
-   tombstones, image presign flow (all API-proven).
+   tombstones, image presign flow (all API-proven). Scope/design:
+   SYNC-ENGINE-DESIGN.md (Nov 27). Backend read leg added Nov 27:
+   presign gained `action: "download"` (the API previously had no
+   image-download path); retest 17/17 (retest-2026-11-27.py in the
+   backend directory).
 2. [ ] **Privacy policy** — written and hosted at a public URL;
    covers accounts and server-side clip storage. Unblocks #3 and
    the marketing landing page.
@@ -34,8 +38,10 @@ plus the ROADMAP.
    50 emails/day; email-code sign-in needs the production limit.
 5. [ ] **AWS Budget + cost-anomaly alerts** — replaces the $20/mo
    spend limit deleted by the Nov 25 activation.
-6. [ ] **CDK RemovalPolicy DESTROY → RETAIN** + redeploy the backend
+6. [x] **CDK RemovalPolicy DESTROY → RETAIN** + redeploy the backend
    stack, so an accidental teardown can't take user data with it.
+   DONE Nov 27, 2026 — table + bucket both Retain in the deployed
+   template; shipped in the same deploy as the presign download leg.
 7. [ ] **clipkeep-backend into a private GitHub repo** — the deployed
    backend currently exists only in ~/workspace/clipkeep-backend/.
 8. [ ] **Management-account root password + MFA** — Femi's hands
