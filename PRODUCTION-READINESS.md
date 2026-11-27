@@ -48,8 +48,10 @@ plus the ROADMAP.
    stack, so an accidental teardown can't take user data with it.
    DONE Nov 27, 2026 — table + bucket both Retain in the deployed
    template; shipped in the same deploy as the presign download leg.
-7. [ ] **clipkeep-backend into a private GitHub repo** — the deployed
-   backend currently exists only in ~/workspace/clipkeep-backend/.
+7. [x] **clipkeep-backend into a private GitHub repo** — DONE
+   Nov 27, 2026: github.com/femisowems/clipkeep-backend (private),
+   22 source files pushed (commit 520e9d9). `.env` stays local
+   only — verified no secret values in anything pushed.
 8. [ ] **Management-account root password + MFA** — Femi's hands
    only (AWS console recommendation from activation day).
 
