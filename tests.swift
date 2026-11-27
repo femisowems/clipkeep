@@ -499,6 +499,21 @@ struct ClipKeepTests {
               acctBack.ackedTombstones == ["gone": 123.0] && acctBack.firstSyncDone
                   && acctBack.lastSyncAt == 999)
 
+        // Account deletion failure copy: every failure
+        // path leaves the account intact, and each message
+        // says so — a failed delete never reads partial.
+        checkEqual("delete: no answer reads as not deleted, offline",
+                   deleteAccountErrorMessage(status: 0),
+                   "Couldn't reach ClipKeep Cloud, so your account has not been deleted. Check your connection and try again.")
+        checkEqual("delete: expired sign-in reads as not deleted",
+                   deleteAccountErrorMessage(status: 401),
+                   "Your sign-in expired before the deletion went through, so your account has not been deleted. Sign in again and try once more.")
+        checkEqual("delete: server error carries its status",
+                   deleteAccountErrorMessage(status: 500),
+                   "ClipKeep Cloud couldn't complete the deletion (error 500), so your account has not been deleted. Try again in a little while.")
+        check("delete: any other status takes the server-error branch",
+              deleteAccountErrorMessage(status: 404).contains("(error 404)"))
+
         // Bytes whose standard base64 spelling uses +, / and =.
         let tricky = Data([0xfb, 0xff, 0xfe, 0x00, 0x01])
         let encodedB64 = base64URLEncode(tricky)
