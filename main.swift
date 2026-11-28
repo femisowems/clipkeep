@@ -1429,6 +1429,20 @@ func otpCodeFromClipboard(_ text: String?) -> String? {
     return stripped
 }
 
+/// Whether refreshList should do its rebuild (perf audit F1,
+/// Nov 27, 2026): the feed is rebuilt only when someone can
+/// see it. While the panel is visible, every call rebuilds —
+/// exactly the old behaviour. While it is hidden, no call
+/// rebuilds; the caller marks the feed dirty instead and the
+/// work waits for the next open. On the panel-show path
+/// itself (the panel is not yet on screen at the call) a
+/// rebuild happens only when the feed is dirty, so a clean
+/// reopen skips straight past it.
+func feedShouldRebuild(panelVisible: Bool, panelShowing: Bool, dirty: Bool) -> Bool {
+    if panelVisible { return true }
+    return panelShowing && dirty
+}
+
 // Tokens in ONE generic-password item, marked
 // ThisDeviceOnly: they must not roam via iCloud Keychain or
 // migrate to another Mac (RESEARCH-NOTES §4). Reads are
@@ -2988,6 +3002,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     var hotKeyRef: EventHotKeyRef?
     var stackHotKeyRef: EventHotKeyRef?
     var stackIDs: [String] = []   // Paste Stack queue, first = next out
+    // Perf audit F1: set when the feed's data changed while
+    // the panel was hidden and the rebuild was deferred; the
+    // next open consumes it. Starts dirty — nothing is built.
+    var feedDirty = true
     var keyMonitor: Any?
 
     // Pill-tab order matches typeFilters. "link" is not a
@@ -6322,12 +6340,28 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         scrollFade.isHidden = !overflowing || atEnd
     }
 
-    func refreshList() {
+    func refreshList(panelShowing: Bool = false) {
         guard listStack != nil else { return }
+        // Drop stack entries whose clips are gone. The Paste
+        // Stack is app state, not feed UI — the ⌃⌥⌘V hotkey
+        // drains it while the panel is hidden — so the prune
+        // stays ahead of the visibility gate below. Everything
+        // after the gate is panel view work.
+        stackIDs = stackIDs.filter { id in store.items.contains { $0.id == id } }
+        // Perf audit F1: never rebuild an invisible feed. A
+        // hidden call marks the feed dirty and returns; the
+        // rebuild runs when the panel next opens (togglePanel
+        // passes panelShowing, and even then only when dirty).
+        // While the panel is visible — the Sync view included,
+        // it is a mode of this same window — every call
+        // rebuilds, byte-for-byte the old behaviour.
+        let panelVisible = panel != nil && panel.isVisible
+        guard feedShouldRebuild(panelVisible: panelVisible, panelShowing: panelShowing, dirty: feedDirty) else {
+            feedDirty = true
+            return
+        }
         rebuildBoardPopup()
         rebuildAppPopup()
-        // Drop stack entries whose clips are gone.
-        stackIDs = stackIDs.filter { id in store.items.contains { $0.id == id } }
         stackBar.isHidden = stackIDs.isEmpty
         if stackBarTopConstraint != nil {
             // v2.15.4: an empty stack also collapses the bar's
@@ -6437,6 +6471,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         // sort shell, empty state) must not resurrect the
         // feed underneath it.
         if syncOpen { applySyncBodyVisibility() }
+        feedDirty = false
     }
 
     // Deterministic height for a wrapping card label (v2.15.5).
@@ -8251,7 +8286,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             // the Sync view is a mode, not a place the panel
             // remembers being in.
             if syncOpen { setSyncView(open: false) }
-            refreshList()
+            // Perf audit F1: the panel is not on screen yet at
+            // this call, so say it is showing — the gate then
+            // rebuilds only if the feed went dirty while hidden.
+            refreshList(panelShowing: true)
             applyFixedPanelFrame()
             panel.makeKeyAndOrderFront(nil)
             // Stage Manager can clamp the frame as the panel

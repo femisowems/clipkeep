@@ -514,6 +514,27 @@ struct ClipKeepTests {
         check("delete: any other status takes the server-error branch",
               deleteAccountErrorMessage(status: 404).contains("(error 404)"))
 
+        // Feed refresh gate (perf audit F1) — the decision
+        // table behind refreshList's visibility gate: a
+        // visible panel rebuilds on every call (the old
+        // behaviour); a hidden panel never rebuilds; the
+        // panel-show path rebuilds only when the feed went
+        // dirty while hidden, so a clean reopen is instant.
+        check("gate: visible panel rebuilds, clean feed",
+              feedShouldRebuild(panelVisible: true, panelShowing: false, dirty: false))
+        check("gate: visible panel rebuilds, dirty feed",
+              feedShouldRebuild(panelVisible: true, panelShowing: false, dirty: true))
+        check("gate: visible panel rebuilds on the show path too",
+              feedShouldRebuild(panelVisible: true, panelShowing: true, dirty: true))
+        check("gate: hidden panel skips, clean feed",
+              !feedShouldRebuild(panelVisible: false, panelShowing: false, dirty: false))
+        check("gate: hidden panel skips even when dirty",
+              !feedShouldRebuild(panelVisible: false, panelShowing: false, dirty: true))
+        check("gate: show path rebuilds a dirty feed",
+              feedShouldRebuild(panelVisible: false, panelShowing: true, dirty: true))
+        check("gate: show path skips a clean feed",
+              !feedShouldRebuild(panelVisible: false, panelShowing: true, dirty: false))
+
         // Bytes whose standard base64 spelling uses +, / and =.
         let tricky = Data([0xfb, 0xff, 0xfe, 0x00, 0x01])
         let encodedB64 = base64URLEncode(tricky)
