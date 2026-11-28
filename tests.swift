@@ -499,6 +499,26 @@ struct ClipKeepTests {
               acctBack.ackedTombstones == ["gone": 123.0] && acctBack.firstSyncDone
                   && acctBack.lastSyncAt == 999)
 
+        // Enqueue filing decision (perf audit F6): the
+        // outbox is filed only once an account record
+        // exists on this Mac. Before that, the first
+        // sync seeds the whole history, so filing would
+        // be pure cost — and undrainable for a user who
+        // never signs in. Once a record exists, every
+        // mutation counts, including ones made while
+        // signed out after having synced.
+        check("enqueue: no account record, no filing",
+              !syncShouldEnqueue(for: SyncAccountState(subject: "")))
+        check("enqueue: a synced account's mutations are filed",
+              syncShouldEnqueue(for: acct))
+        let firstSyncAcct = SyncAccountState(subject: "user-2")
+        check("enqueue: mid-first-sync mutations are filed",
+              syncShouldEnqueue(for: firstSyncAcct))
+        var drainedAcct = SyncAccountState(subject: "user-1")
+        drainedAcct.firstSyncDone = true
+        check("enqueue: a drained outbox still files new mutations",
+              syncShouldEnqueue(for: drainedAcct))
+
         // Account deletion failure copy: every failure
         // path leaves the account intact, and each message
         // says so — a failed delete never reads partial.
