@@ -2206,6 +2206,26 @@ func syncBatches<T>(_ items: [T], limit: Int = 100) -> [[T]] {
     return batches
 }
 
+// Whether a local mutation must be filed in the sync
+// outbox (perf audit F6). Filing is worth its bookkeeping
+// only once an account record exists on this Mac — the
+// record is created by the first sync cycle, so a real
+// subject means some account has synced (or started to)
+// here. Before that, filing buys nothing: a fresh
+// account's first sync files the whole local history
+// anyway (the push phase's seeding), and for a user who
+// never signs in the outbox could never drain — it would
+// grow with every clip, pure cost per mutation. Once a
+// record exists, EVERY mutation is filed — including
+// ones made while signed out after having synced, whose
+// edits and captures must be waiting in the outbox at
+// the next sign-in (deletes are doubly covered: the
+// push phase's tombstone sweep re-files unacknowledged
+// deletions on every cycle).
+func syncShouldEnqueue(for acct: SyncAccountState) -> Bool {
+    !acct.subject.isEmpty
+}
+
 func syncContentType(forExt ext: String) -> String {
     switch ext.lowercased() {
     case "jpg", "jpeg": return "image/jpeg"
@@ -2250,24 +2270,73 @@ final class SyncEngine {
     // the object is gone), not an error; don't ask again
     // this launch.
     private var imageFetchMisses: Set<String> = []
+    // The one in-memory copy of the persisted account
+    // record (perf audit F6): decoded from UserDefaults
+    // exactly once, lazily on first touch, mutated in
+    // place, and written back debounced — the enqueue
+    // path never decodes. Like everything else in the
+    // engine, the cache is touched only on the main
+    // queue (mutations arrive there, cycle completions
+    // land there, the persist timer fires there).
+    private var cachedAccount: SyncAccountState?
+    private var persistWork: DispatchWorkItem?
+    // How long a state change may sit in memory before
+    // it must reach disk. Bounded and small: a crash
+    // inside the window loses at most this much
+    // bookkeeping (mutations re-file on their next edit;
+    // deletions also ride the push phase's tombstone
+    // sweep), and the real durability points — a cycle
+    // starting or finishing, sign-out, account reset,
+    // termination — all flush immediately.
+    private static let persistDelay: TimeInterval = 2
 
     static let apiBase = "https://ajiilxo2e6.execute-api.us-east-1.amazonaws.com"
     private static let stateKey = "ClipKeepSyncStateV1"
 
     // MARK: Persisted per-account state
 
+    // The account record, from the in-memory cache —
+    // decoded from UserDefaults exactly once, on first
+    // touch. A missing or unreadable record reads as
+    // the empty-subject fresh record, as before.
     private func storedAccount() -> SyncAccountState {
+        if let cachedAccount { return cachedAccount }
+        var acct = SyncAccountState(subject: "")
         if let data = UserDefaults.standard.data(forKey: Self.stateKey),
            let decoded = try? JSONDecoder().decode(SyncAccountState.self, from: data) {
-            return decoded
+            acct = decoded
         }
-        return SyncAccountState(subject: "")
+        cachedAccount = acct
+        return acct
     }
 
+    // File a new version of the record: the cache takes
+    // it now; disk takes it within persistDelay. The
+    // write coalesces — a burst of mutations costs one
+    // encode, not one encode + defaults write each.
     private func saveStoredAccount(_ acct: SyncAccountState) {
-        if let data = try? JSONEncoder().encode(acct) {
-            UserDefaults.standard.set(data, forKey: Self.stateKey)
-        }
+        cachedAccount = acct
+        persistWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.persistCachedAccount() }
+        persistWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.persistDelay, execute: work)
+    }
+
+    // Write the cached record to UserDefaults now,
+    // cancelling any pending debounced write. The
+    // durability points call this: a cycle starting and
+    // finishing (runCycle / finishCycle), sign-out,
+    // account reset, and app termination — the moments
+    // where losing the last mutations would actually
+    // matter. With no cache there is nothing to write:
+    // no record is conjured up for a user who never
+    // had one.
+    func persistCachedAccount() {
+        persistWork?.cancel()
+        persistWork = nil
+        guard let cachedAccount,
+              let data = try? JSONEncoder().encode(cachedAccount) else { return }
+        UserDefaults.standard.set(data, forKey: Self.stateKey)
     }
 
     // The record a cycle works on: the stored one when it
@@ -2303,6 +2372,20 @@ final class SyncEngine {
         followUpNeeded = false
         let stored = storedAccount()
         if stored.subject == subject || stored.subject.isEmpty {
+            // The cached copy and any pending debounced
+            // write go too: a write landing after this
+            // removal would resurrect the deleted
+            // account's record (watermark, outbox, acked
+            // tombstones) from beyond the wipe. Cancelling
+            // the work item stops the scheduled write, and
+            // clearing the cache means even a write that
+            // somehow still ran would find nothing to
+            // write. Every later save builds its record
+            // from storedAccount() — post-reset state —
+            // so no pre-reset values can come back either.
+            persistWork?.cancel()
+            persistWork = nil
+            cachedAccount = nil
             UserDefaults.standard.removeObject(forKey: Self.stateKey)
         }
         if state != .idle { state = .idle }
@@ -2323,14 +2406,22 @@ final class SyncEngine {
     // MARK: Triggers
 
     // A local mutation files its clip id in the outbox —
-    // unconditionally, signed in or not, sync on or not: the
-    // filing is a set insert, and the drain decides later.
-    // (Mutations made under a different account than the
-    // stored record's are still safe: a fresh account's
-    // first sync files the whole local history anyway.)
+    // the drain decides later whether it goes anywhere.
+    // The filing itself is in-memory now (perf audit F6):
+    // a set insert against the cached record, persisted
+    // debounced — not a decode + encode + defaults write
+    // per mutation. And it happens only once an account
+    // record exists on this Mac (syncShouldEnqueue):
+    // before that there is nothing to file against, and
+    // the first sync's seeding makes the backlog moot.
+    // The debounced-sync trigger fires either way, as
+    // before. (Mutations made under a different account
+    // than the stored record's are still safe: a fresh
+    // account's first sync files the whole local history
+    // anyway.)
     func enqueue(_ id: String) {
         var acct = storedAccount()
-        if !acct.outbox.contains(id) {
+        if syncShouldEnqueue(for: acct), !acct.outbox.contains(id) {
             acct.outbox.append(id)
             saveStoredAccount(acct)
         }
@@ -2367,9 +2458,13 @@ final class SyncEngine {
         cycleGeneration = stateGeneration
         state = .syncing
         let subject = session.identity.subject
-        // Persist the working record up front, so an account
-        // switch is durable even if this cycle dies early.
+        // Flush any debounced bookkeeping before the
+        // cycle reads state, then persist the working
+        // record up front, so an account switch is
+        // durable even if this cycle dies early.
+        persistCachedAccount()
         saveStoredAccount(workingAccount(for: subject))
+        persistCachedAccount()
         pullPhase(subject: subject)
     }
 
@@ -2379,6 +2474,14 @@ final class SyncEngine {
             acct.lastSyncAt = Date().timeIntervalSince1970
             saveStoredAccount(acct)
         }
+        // A finished cycle is a durability point: the
+        // watermark, the drained outbox and the acked
+        // tombstones it produced reach disk now, not
+        // whenever the debounce happens to land. (An
+        // orphaned cycle never gets here — it aborts
+        // through abortOrphanedCycle and persists
+        // nothing.)
+        if cycleIsCurrent { persistCachedAccount() }
         running = false
         state = outcome
         if followUpNeeded {
@@ -6129,6 +6232,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     }
 
     @objc func signOutClicked() {
+        // The engine's account record survives sign-out
+        // on purpose — mutations made while signed out
+        // are filed against it for the next sign-in —
+        // but whatever bookkeeping is still in memory
+        // reaches disk first, so a quit inside the
+        // persist debounce window loses nothing.
+        syncEngine.persistCachedAccount()
         auth.signOut()
     }
 
@@ -8230,9 +8340,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
     // Flush any debounced history save before the process goes
     // (v2.12.0) — quitting inside the 0.25s window, including
-    // the updater's swap-and-relaunch, must lose nothing.
+    // the updater's swap-and-relaunch, must lose nothing. The
+    // sync engine's debounced state persist (F6) flushes on
+    // the same principle.
     func applicationWillTerminate(_ notification: Notification) {
         store.saveNow()
+        syncEngine.persistCachedAccount()
     }
 
     // MARK: Panel toggle + hotkeys
