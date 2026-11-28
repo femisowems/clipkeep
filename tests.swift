@@ -158,6 +158,28 @@ struct ClipKeepTests {
         checkEqual("store: a pinned copy survives a later duplicate",
                    store.items.filter { $0.text == "first" }.count, 2)
 
+        // Insert position (perf audit F2): a clip takes the
+        // slot its createdAt earns, so a capture that finished
+        // processing late (an image off the transcode queue)
+        // lands below copies made after it — while equal
+        // timestamps still stack on top, as the checks above
+        // rely on. Distinct texts, so dedupe stays out of it.
+        func timedItem(_ id: String, _ at: Double) -> ClipItem {
+            ClipItem(id: id, kind: "text", text: id, imageFile: nil, createdAt: at,
+                     pinned: false, filePath: nil, sourceApp: nil, sourceBundleID: nil,
+                     ocrText: nil, board: nil, contentHash: nil)
+        }
+        store.insert(timedItem("newer", 2))
+        store.insert(timedItem("older", 0.5))
+        checkEqual("store: a late-finishing capture lands below newer copies",
+                   store.items.first?.id, "newer")
+        check("store: the older capture sits beneath the newer one",
+              (store.items.firstIndex { $0.id == "older" } ?? -1)
+                  > (store.items.firstIndex { $0.id == "newer" } ?? -1))
+        store.insert(timedItem("tie", 2))
+        checkEqual("store: equal timestamps still land on top",
+                   store.items.first?.id, "tie")
+
         store.saveNow()
         let reloaded = ClipStore()
         checkEqual("store: save/load round trip",
@@ -554,6 +576,25 @@ struct ClipKeepTests {
               feedShouldRebuild(panelVisible: false, panelShowing: true, dirty: true))
         check("gate: show path skips a clean feed",
               !feedShouldRebuild(panelVisible: false, panelShowing: true, dirty: false))
+
+        // Image capture format (perf audit F2) — the
+        // representation decision behind the image pipeline:
+        // already-encoded bytes are captured as offered (PNG
+        // first, then JPEG), TIFF is only the transcode
+        // fallback, and nil means the pasteboard carries no
+        // image at all.
+        checkEqual("image format: PNG beats JPEG and TIFF",
+                   imageCaptureFormat(hasPNG: true, hasJPEG: true, hasTIFF: true), "png")
+        checkEqual("image format: PNG alone",
+                   imageCaptureFormat(hasPNG: true, hasJPEG: false, hasTIFF: false), "png")
+        checkEqual("image format: JPEG beats TIFF",
+                   imageCaptureFormat(hasPNG: false, hasJPEG: true, hasTIFF: true), "jpg")
+        checkEqual("image format: JPEG alone",
+                   imageCaptureFormat(hasPNG: false, hasJPEG: true, hasTIFF: false), "jpg")
+        checkEqual("image format: TIFF alone means transcode",
+                   imageCaptureFormat(hasPNG: false, hasJPEG: false, hasTIFF: true), "tiff")
+        checkEqual("image format: no representation at all",
+                   imageCaptureFormat(hasPNG: false, hasJPEG: false, hasTIFF: false), nil)
 
         // Bytes whose standard base64 spelling uses +, / and =.
         let tricky = Data([0xfb, 0xff, 0xfe, 0x00, 0x01])

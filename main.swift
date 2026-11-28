@@ -242,7 +242,14 @@ final class ClipStore {
         if let name = item.linkImageFile { try? FileManager.default.removeItem(at: imagesDir.appendingPathComponent(name)) }
     }
 
-    // Insert at top, de-duplicating identical unpinned, unboarded clips.
+    // Insert, de-duplicating identical unpinned, unboarded
+    // clips. The list is newest first: a clip takes the slot
+    // its createdAt earns — the top for anything captured
+    // just now, further down for a clip whose capture
+    // finished late (an image off the transcode queue, perf
+    // audit F2), so a slow capture never jumps above copies
+    // made after it. Equal timestamps land above their
+    // twins, exactly as the old always-on-top insert did.
     func insert(_ item: ClipItem) {
         var item = item
         // Sync-ready stamps: when the clip last changed, and the
@@ -254,7 +261,8 @@ final class ClipStore {
         for old in items where !old.isKeeper && sameContent(old, item) {
             remove(old)
         }
-        items.insert(item, at: 0)
+        let slot = items.firstIndex(where: { $0.createdAt <= item.createdAt }) ?? items.count
+        items.insert(item, at: slot)
         trim()
         save()
     }
@@ -1441,6 +1449,21 @@ func otpCodeFromClipboard(_ text: String?) -> String? {
 func feedShouldRebuild(panelVisible: Bool, panelShowing: Bool, dirty: Bool) -> Bool {
     if panelVisible { return true }
     return panelShowing && dirty
+}
+
+/// Which pasteboard representation an image copy is captured
+/// from (perf audit F2, Nov 27, 2026): the already-encoded
+/// bytes, exactly as offered — PNG first (lossless, and what
+/// the store has always held), then JPEG — and TIFF only when
+/// nothing encoded was offered, since TIFF pays a transcode.
+/// Returns the stored file's extension for the encoded
+/// formats, "tiff" for the transcode path, and nil when the
+/// pasteboard carries no image representation at all.
+func imageCaptureFormat(hasPNG: Bool, hasJPEG: Bool, hasTIFF: Bool) -> String? {
+    if hasPNG { return "png" }
+    if hasJPEG { return "jpg" }
+    if hasTIFF { return "tiff" }
+    return nil
 }
 
 // Tokens in ONE generic-password item, marked
@@ -3109,6 +3132,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
     // the panel was hidden and the rebuild was deferred; the
     // next open consumes it. Starts dirty — nothing is built.
     var feedDirty = true
+    // Perf audit F2: image copies are hashed (and TIFF-only
+    // copies transcoded) here instead of on the poll's run
+    // loop. Serial, so image captures complete in the order
+    // they were copied.
+    let imagePipeline = DispatchQueue(label: "io.starterdev.clipkeep.image-pipeline", qos: .userInitiated)
     var keyMonitor: Any?
 
     // Pill-tab order matches typeFilters. "link" is not a
@@ -3278,38 +3306,26 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             return
         }
 
-        // Images — saved as PNG, then OCR'd so their text is searchable.
-        if let image = pb.readObjects(forClasses: [NSImage.self], options: nil)?.first as? NSImage,
-           let tiff = image.tiffRepresentation,
-           let rep = NSBitmapImageRep(data: tiff),
-           let png = rep.representation(using: .png, properties: [:]) {
-            let hash = fnvHash(png)
-            if store.items.first?.kind == "image" && store.items.first?.contentHash == hash { return }
-            let name = UUID().uuidString + ".png"
-            let url = store.imagesDir.appendingPathComponent(name)
-            if (try? png.write(to: url)) != nil {
-                let id = UUID().uuidString
-                let newItem = ClipItem(id: id, kind: "image", text: nil, imageFile: name,
-                                       createdAt: now, pinned: false, filePath: nil,
-                                       sourceApp: sourceName, sourceBundleID: sourceBundle,
-                                       ocrText: nil, board: nil, contentHash: hash)
-                store.insert(newItem)
-                noteSyncMutation(newItem.id)
-                refreshList()
-                noteCapture(newItem)
-                recognizeText(in: png) { [weak self] text in
-                    guard let self, let text,
-                          let idx = self.store.items.firstIndex(where: { $0.id == id }) else { return }
-                    self.store.items[idx].ocrText = text
-                    // OCR arrival is a mutation like any
-                    // other: stamp it, so sync's
-                    // last-writer-wins ordering sees it.
-                    self.store.touch(id: id)
-                    self.store.save()
-                    self.noteSyncMutation(id)
-                    self.refreshList()
-                }
-            }
+        // Images — OCR'd so their text is searchable. The poll
+        // only snapshots the pasteboard's bytes, here on the
+        // poll thread (the pasteboard is never read anywhere
+        // else): which representation to capture from is
+        // imageCaptureFormat's call, and the heavy work —
+        // hashing, plus the TIFF→PNG transcode for copies
+        // that offered nothing already encoded — happens in
+        // captureImage, off this run loop (perf audit F2;
+        // both used to run right here, freezing the UI for
+        // the size of every copied image). The TIFF snapshot
+        // falls back to the NSImage route so the branch fires
+        // for exactly the pasteboards it always did.
+        let pngData = pb.data(forType: .png)
+        let jpegData = pb.data(forType: NSPasteboard.PasteboardType("public.jpeg"))
+        let tiffData = pb.data(forType: .tiff)
+            ?? (pb.readObjects(forClasses: [NSImage.self], options: nil)?.first as? NSImage)?.tiffRepresentation
+        if let format = imageCaptureFormat(hasPNG: pngData != nil, hasJPEG: jpegData != nil, hasTIFF: tiffData != nil) {
+            let snapshot = format == "png" ? pngData! : (format == "jpg" ? jpegData! : tiffData!)
+            captureImage(snapshot: snapshot, format: format, capturedAt: now,
+                         sourceName: sourceName, sourceBundle: sourceBundle)
             return
         }
 
@@ -3357,6 +3373,83 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             refreshList()
             enrichLinkIfNeeded(newItem)
             noteCapture(newItem)
+        }
+    }
+
+    // Image capture, back half (perf audit F2): runs on the
+    // serial image pipeline, never on the poll's run loop.
+    // Encoded bytes are hashed as they are; a TIFF snapshot
+    // is transcoded to PNG first. A failed transcode drops
+    // the clip silently — no partial insert, nothing left
+    // in flight — exactly as the old synchronous failure
+    // behaved. The pasteboard itself is never touched here:
+    // everything works from the poll's snapshot.
+    private func captureImage(snapshot: Data, format: String, capturedAt: Double,
+                              sourceName: String?, sourceBundle: String?) {
+        imagePipeline.async {
+            let bytes: Data
+            let ext: String
+            if format == "tiff" {
+                guard let rep = NSBitmapImageRep(data: snapshot),
+                      let png = rep.representation(using: .png, properties: [:]) else { return }
+                bytes = png
+                ext = "png"
+            } else {
+                bytes = snapshot
+                ext = format
+            }
+            let hash = fnvHash(bytes)
+            DispatchQueue.main.async { [weak self] in
+                self?.finishImageCapture(bytes: bytes, hash: hash, ext: ext,
+                                         capturedAt: capturedAt,
+                                         sourceName: sourceName, sourceBundle: sourceBundle)
+            }
+        }
+    }
+
+    // Image capture, front half: back on the main thread with
+    // the final bytes and their hash. Everything from here is
+    // the old poll-path code — the dedup check, the file
+    // write, the insert, the OCR kick-off — unchanged except
+    // that it lands a beat after the copy instead of inside
+    // the poll, and the clip carries its capture time, so
+    // insert() slots it below anything copied after it.
+    private func finishImageCapture(bytes: Data, hash: String, ext: String, capturedAt: Double,
+                                    sourceName: String?, sourceBundle: String?) {
+        if store.items.first?.kind == "image" && store.items.first?.contentHash == hash { return }
+        // OCR carry-over (the Nov 25 plan's rider): if these
+        // exact pixels already live in the store, their
+        // recognized text comes along with the fresh clip —
+        // searchable at once, and OCR never runs twice for
+        // the same image. (The insert below still removes
+        // the old twin, as always, when it isn't pinned or
+        // boarded; if its OCR hasn't landed yet the fresh
+        // clip simply runs its own.)
+        let carriedOCR = store.items.first(where: { $0.kind == "image" && $0.contentHash == hash })?.ocrText
+        let name = UUID().uuidString + "." + ext
+        let url = store.imagesDir.appendingPathComponent(name)
+        guard (try? bytes.write(to: url)) != nil else { return }
+        let id = UUID().uuidString
+        let newItem = ClipItem(id: id, kind: "image", text: nil, imageFile: name,
+                               createdAt: capturedAt, pinned: false, filePath: nil,
+                               sourceApp: sourceName, sourceBundleID: sourceBundle,
+                               ocrText: carriedOCR, board: nil, contentHash: hash)
+        store.insert(newItem)
+        noteSyncMutation(newItem.id)
+        refreshList()
+        noteCapture(newItem)
+        guard carriedOCR == nil else { return }
+        recognizeText(in: bytes) { [weak self] text in
+            guard let self, let text,
+                  let idx = self.store.items.firstIndex(where: { $0.id == id }) else { return }
+            self.store.items[idx].ocrText = text
+            // OCR arrival is a mutation like any
+            // other: stamp it, so sync's
+            // last-writer-wins ordering sees it.
+            self.store.touch(id: id)
+            self.store.save()
+            self.noteSyncMutation(id)
+            self.refreshList()
         }
     }
 
@@ -6784,7 +6877,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         switch item.kind {
         case "image":
             if let name = item.imageFile, let dims = imageDimensions(forFile: name) {
-                return "PNG · \(Int(dims.width)) × \(Int(dims.height))"
+                // The label names the stored bytes' real
+                // format (perf audit F2: JPEG copies now stay
+                // JPEG instead of being transcoded to PNG).
+                let format = (name as NSString).pathExtension.uppercased()
+                return "\(format.isEmpty ? "PNG" : format) · \(Int(dims.width)) × \(Int(dims.height))"
             }
             return "Image"
         case "file":
