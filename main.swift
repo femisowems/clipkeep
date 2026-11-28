@@ -1466,6 +1466,54 @@ func imageCaptureFormat(hasPNG: Bool, hasJPEG: Bool, hasTIFF: Bool) -> String? {
     return nil
 }
 
+/// The HTML body a link fetch hands to meta extraction
+/// (perf audit F8, Nov 27, 2026): the page, capped at `limit`
+/// bytes (256 KB by default). The meta tags the fetch wants
+/// live in the <head>, so nothing past the cap is ever read —
+/// but an uncapped page costs a full download's worth of
+/// string conversion and regex scanning per copied link.
+/// When the cap lands mid–UTF-8 sequence, the trailing
+/// partial bytes are dropped: left in, they would fail the
+/// UTF-8 decode of the whole page and drop it to the Latin-1
+/// fallback, garbling every non-ASCII title on it. (A
+/// genuinely Latin-1 page loses only bytes at the unread
+/// tail, and its decode never fails.) A meta tag the cap
+/// cuts in half simply doesn't match — extraction sees one
+/// fewer tag, never a crash or a garbage match.
+func cappedHTMLData(_ data: Data, limit: Int = 262_144) -> Data {
+    let limit = max(0, limit)
+    guard data.count > limit else { return data }
+    let bytes = [UInt8](data.prefix(limit))
+    var end = bytes.count
+    // Walk back over trailing continuation bytes (10xxxxxx)
+    // to the sequence's lead byte.
+    var continuations = 0
+    var i = end - 1
+    while i >= 0, continuations < 3, (bytes[i] & 0xC0) == 0x80 {
+        continuations += 1
+        i -= 1
+    }
+    if i < 0 {
+        end = 0 // nothing but continuation bytes
+    } else if continuations > 0 {
+        let expected: Int
+        switch bytes[i] {
+        case 0xC0...0xDF: expected = 1
+        case 0xE0...0xEF: expected = 2
+        case 0xF0...0xF7: expected = 3
+        default: expected = 0
+        }
+        // A complete sequence at the cut is kept whole;
+        // anything else drops from the lead byte on.
+        if continuations != expected { end = i }
+    } else if bytes[i] >= 0xC0 {
+        // The cut lands immediately after a lead byte whose
+        // continuation bytes never made it.
+        end = i
+    }
+    return Data(bytes[..<end])
+}
+
 // Tokens in ONE generic-password item, marked
 // ThisDeviceOnly: they must not roam via iCloud Keychain or
 // migrate to another Mac (RESEARCH-NOTES §4). Reads are
@@ -3229,21 +3277,24 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             self?.pollClipboard()
             self?.checkClipboardForOTPCode()
         }
+        // Let the system coalesce the poll wakeup with other
+        // work — half the interval, the most Timer asks for.
+        timer?.tolerance = 0.25
         // Fresh timestamps (v2.11.0): the cards' relative times
         // ("39 minutes ago") otherwise only change when the list
         // rebuilds for another reason. Once a minute, if the
-        // panel is open and key, rebuild with the scroll position
-        // preserved. The timer runs in the default run-loop mode,
-        // so it cannot fire while a menu is tracking or a modal
-        // is up; selection survives via selectedItemID.
+        // panel is open and key, update the labels in place
+        // (perf audit F4 — this used to be a full refreshList
+        // rebuild with scroll save/restore: a guaranteed hitch
+        // per minute of panel-open time). The timer runs in the
+        // default run-loop mode, so it cannot fire while a menu
+        // is tracking or a modal is up, and the label walk
+        // itself no-ops while the panel is hidden.
         timeRefreshTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            guard let self, self.panel != nil, self.panel.isVisible, self.panel.isKeyWindow,
-                  self.scrollView != nil else { return }
-            let origin = self.scrollView.contentView.bounds.origin
-            self.refreshList()
-            self.scrollView.contentView.scroll(to: origin)
-            self.scrollView.reflectScrolledClipView(self.scrollView.contentView)
+            guard let self, self.panel != nil, self.panel.isVisible, self.panel.isKeyWindow else { return }
+            self.refreshTimeLabels()
         }
+        timeRefreshTimer?.tolerance = 0.25
 
         // Open the panel on launch (v2.14.0, Femi's Nov 18
         // Loom): clicking ClipKeep in the Apps grid launched it
@@ -3585,6 +3636,36 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         listStack?.arrangedSubviews.first { $0.identifier?.rawValue == item.id }
     }
 
+    // A card's header time label, tagged at build time in
+    // rowView with timeLabelIdentifier.
+    func timeLabel(in view: NSView) -> NSTextField? {
+        if let field = view as? NSTextField, field.identifier?.rawValue == Self.timeLabelIdentifier.rawValue { return field }
+        for sub in view.subviews {
+            if let found = timeLabel(in: sub) { return found }
+        }
+        return nil
+    }
+
+    // Perf audit F4: refresh the visible cards' relative-time
+    // labels in place. The text comes from the very same
+    // relativeTimeString a rebuild would call, so the strings
+    // are identical by construction — only the delivery
+    // changed: no views are torn down and the scroll position
+    // is never disturbed. Cards carry their clip's id as
+    // their identifier; a card whose clip has left the store
+    // is skipped (the next rebuild removes it anyway). No-ops
+    // while the panel is hidden.
+    func refreshTimeLabels() {
+        guard panel != nil, panel.isVisible, listStack != nil else { return }
+        for card in listStack.arrangedSubviews {
+            guard let id = card.identifier?.rawValue,
+                  let item = store.items.first(where: { $0.id == id }),
+                  let label = timeLabel(in: card) else { continue }
+            let text = relativeTimeString(item.createdAt)
+            if label.stringValue != text { label.stringValue = text }
+        }
+    }
+
     // Flashes the item's card if it is on screen; returns whether
     // it did, so paste can hold the panel for the flash. The chip
     // label matches the action ("✓ Copied" / "✓ Pasted") — until
@@ -3908,7 +3989,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
             guard let self else { return }
             var title: String?
             var imageURL: URL?
-            if let data, let html = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) {
+            // Perf audit F8: only the <head> meta is wanted,
+            // so the body is capped at 256 KB before it becomes
+            // a string — big pages no longer pay a full-page
+            // conversion + regex scan per copied link.
+            let body = data.map { cappedHTMLData($0) }
+            if let body, let html = String(data: body, encoding: .utf8) ?? String(data: body, encoding: .isoLatin1) {
                 title = self.metaContent(html, keys: ["og:title", "twitter:title"]) ?? self.pageTitle(html)
                 if let ref = self.metaContent(html, keys: ["og:image", "twitter:image"]) {
                     imageURL = URL(string: ref, relativeTo: url)?.absoluteURL
@@ -6752,6 +6838,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
 
     // MARK: Paste-style cards
 
+    /// Identifier tagging each card's header time label, so
+    /// the 60-second refresh (perf audit F4) can find the
+    /// labels and update them in place instead of rebuilding
+    /// the whole feed to move "39 minutes ago" one minute on.
+    static let timeLabelIdentifier = NSUserInterfaceItemIdentifier("clipTimeLabel")
+
     static let relativeFormatter: RelativeDateTimeFormatter = {
         let f = RelativeDateTimeFormatter()
         f.unitsStyle = .full
@@ -7017,6 +7109,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSSearchFieldDelegat
         header.addSubview(typeText)
 
         let timeText = NSTextField(labelWithString: relativeTimeString(item.createdAt))
+        timeText.identifier = Self.timeLabelIdentifier
         timeText.font = NSFont.systemFont(ofSize: 10.5)
         timeText.textColor = onBand.withAlphaComponent(0.85)
         timeText.translatesAutoresizingMaskIntoConstraints = false

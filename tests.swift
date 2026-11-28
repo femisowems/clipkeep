@@ -596,6 +596,44 @@ struct ClipKeepTests {
         checkEqual("image format: no representation at all",
                    imageCaptureFormat(hasPNG: false, hasJPEG: false, hasTIFF: false), nil)
 
+        // HTML cap (perf audit F8) — the truncation behind
+        // link meta extraction: bodies at or under the cap
+        // pass through untouched; over it, the cut lands on a
+        // UTF-8 boundary, so the page still decodes as UTF-8
+        // instead of dropping to the Latin-1 fallback (which
+        // would garble every non-ASCII title on the page).
+        let smallHTML = Data("<html><head><title>x</title>".utf8)
+        checkEqual("html cap: under the limit passes through",
+                   cappedHTMLData(smallHTML, limit: 262_144), smallHTML)
+        checkEqual("html cap: exactly at the limit passes through",
+                   cappedHTMLData(smallHTML, limit: smallHTML.count), smallHTML)
+        let asciiPage = Data(String(repeating: "a", count: 100).utf8)
+        checkEqual("html cap: ASCII truncates to the limit",
+                   cappedHTMLData(asciiPage, limit: 10).count, 10)
+        // é = 0xC3 0xA9: a cut between the two bytes must
+        // drop the partial character, and a cut after both
+        // must keep it whole.
+        var twoByteTail = Data("ab".utf8)
+        twoByteTail.append(contentsOf: [0xC3, 0xA9])
+        checkEqual("html cap: split 2-byte sequence drops the partial char",
+                   cappedHTMLData(twoByteTail, limit: 3), Data("ab".utf8))
+        var twoByteKept = twoByteTail
+        twoByteKept.append(contentsOf: [0x7A, 0x7A]) // "zz" past the cut
+        checkEqual("html cap: complete 2-byte sequence at the cut is kept",
+                   cappedHTMLData(twoByteKept, limit: 4), twoByteTail)
+        // € = 0xE2 0x82 0xAC: a cut after the second byte
+        // drops the whole partial character.
+        var threeByteTail = Data("x".utf8)
+        threeByteTail.append(contentsOf: [0xE2, 0x82, 0xAC])
+        checkEqual("html cap: split 3-byte sequence drops the partial char",
+                   cappedHTMLData(threeByteTail, limit: 3), Data("x".utf8))
+        check("html cap: truncated UTF-8 still decodes as UTF-8",
+              String(data: cappedHTMLData(threeByteTail, limit: 3), encoding: .utf8) != nil)
+        // The default limit is the audit's 256 KB.
+        let bigPage = Data(String(repeating: "a", count: 300_000).utf8)
+        checkEqual("html cap: default limit is 256 KB",
+                   cappedHTMLData(bigPage).count, 262_144)
+
         // Bytes whose standard base64 spelling uses +, / and =.
         let tricky = Data([0xfb, 0xff, 0xfe, 0x00, 0x01])
         let encodedB64 = base64URLEncode(tricky)
